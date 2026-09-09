@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Датчик железа → MOTUS. Читает то немногое, что на Pi 5 реально соматично, и
 шлёт одним событием `kind=sensor` в motusd. Запускается по таймеру
-(`deploy/motus-somatic.timer`) внутри того же контейнера `grach`.
+(`deploy/motus-somatic.timer`) внутри контейнера `grach` (там openclaw, чью живость проверяем).
 
 Платформенная специфика (пути в /sys, отсутствие vcgencmd в контейнере) намеренно
 живёт здесь, в deploy/, а не в ядре: `motus/appraisal.py:somatic_update()` принимает
@@ -100,7 +100,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--motusd", default="http://127.0.0.1:18790",
-                    help="адрес motusd (тот же контейнер, loopback)")
+                    help="адрес публичного API MOTUS (проксирован в grach как 127.0.0.1:18790)")
     ap.add_argument("--openclaw-port", type=int, default=18789,
                     help="порт openclaw gateway для проверки живости")
     ap.add_argument("--dry-run", action="store_true", help="только напечатать payload")
