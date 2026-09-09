@@ -162,8 +162,8 @@
   },
   "appraisal": {
     "enabled": false,
-    "_note": "Выключено по умолчанию, пока модель не скачана и не проверена руками — см. docs/04-model-l1.md. Включить: enabled=true. Пул: ollama pull qwen3:0.6b-q4_K_M",
-    "base_url": "http://host.docker.internal:11435",
+    "_note": "Выключено по умолчанию, пока обе модели не прогнаны через tools/bench_l1_model.py — см. docs/04-model-l1.md. base_url — 127.0.0.1, НЕ host.docker.internal: motusd работает как обычный systemd-процесс на хосте (deploy/motusd.service), не в Docker, поэтому докеровский DNS-алиас host.docker.internal ему не резолвится. host.docker.internal нужен только openclaw (он в контейнере) для обращения К motusd, а не наоборот. Порт 11435 — тот же, что уже слушает ollama на этой машине (см. openclaw.json).",
+    "base_url": "http://127.0.0.1:11435",
     "model": "qwen3:0.6b-q4_K_M",
     "timeout_s": 3.0,
     "num_predict": 80,
