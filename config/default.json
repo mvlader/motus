@@ -161,12 +161,15 @@
     "_note": "Скука: сетпоинт SEEKING растёт от времени без нового входа. Без неё тонические драйвы недостижимы — они сидят на сетпоинте ниже порога и режим SEEKING не наступает никогда."
   },
   "appraisal": {
-    "enabled": false,
-    "_note": "Выключено по умолчанию, пока обе модели не прогнаны через tools/bench_l1_model.py — см. docs/04-model-l1.md. base_url — 127.0.0.1, НЕ host.docker.internal: motusd работает как обычный systemd-процесс на хосте (deploy/motusd.service), не в Docker, поэтому докеровский DNS-алиас host.docker.internal ему не резолвится. host.docker.internal нужен только openclaw (он в контейнере) для обращения К motusd, а не наоборот. Порт 11435 — тот же, что уже слушает ollama на этой машине (см. openclaw.json).",
-    "base_url": "http://127.0.0.1:11435",
-    "model": "qwen3:0.6b-q4_K_M",
-    "timeout_s": 3.0,
-    "num_predict": 80,
+    "mode": "lexical",
+    "_note": "L-1, оценка текста сообщения. mode=lexical (умолчание) — детерминированный словарь motus/lexicon_l1.py: без модели, без сети, без задержки; на выборке GOLD бьёт Qwen3-1.7B по ±1 (docs/04-model-l1.md). mode=model — малая локальная модель через llama.cpp/ollama (поля api/base_url/model ниже), отказ модели → нули + appraisal_invalid в журнал. mode=off — текст не оценивается вовсе. Поля модели используются только при mode=model; llama-server поднимает deploy/llama-l1.service ВНУТРИ grach, к нему ходят по loopback :8080 (это НЕ LAN-ПК 192.168.2.27, которым openclaw считает utilityModel).",
+    "_note_guards": "lexical_strict=true — выше пороги входа в ненулевое значение, косвенные связки отключены: вдвое меньше ложных знаков на сарказме/двусмысленности ценой того, что часть слабых настоящих сигналов уходит в ноль (безвредно). На обычных сообщениях и без него вреда 0%. См. docs/04-model-l1.md, «Отсечение неправильного вывода».",
+    "lexical_strict": false,
+    "api": "llamacpp",
+    "base_url": "http://127.0.0.1:8080",
+    "model": "Qwen3-1.7B-Q4_K_M.gguf",
+    "timeout_s": 20.0,
+    "num_predict": 96,
     "temperature": 0.0
   }
 }

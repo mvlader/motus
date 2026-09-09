@@ -26,11 +26,23 @@ from motus.journal import Journal, NullJournal  # noqa: E402
 from motus.state import State  # noqa: E402
 from motus.verbalizer import CardError, Verbalizer  # noqa: E402
 
+import importlib.util  # noqa: E402
+_probe_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "deploy", "somatic_probe.py")
+_spec = importlib.util.spec_from_file_location("somatic_probe", _probe_path)
+somatic_probe = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(somatic_probe)
+
 T0 = 1767225600.0  # фиксированная точка отсчёта, чтобы тесты не зависели от «сегодня»
 
 
 def cfg_full():
     return config.load()
+
+
+def _nonzero(a) -> int:
+    return sum(1 for v in (a.valence, a.threat, a.novelty, a.social_warmth, a.loss) if v) \
+        + int(a.agency_blocked)
 
 
 def cfg_static():
@@ -427,7 +439,7 @@ class TestAppraisal(unittest.TestCase):
             captured["timeout"] = timeout
             return FakeResp()
 
-        cfg = {"base_url": "http://host.docker.internal:11435",
+        cfg = {"base_url": "http://127.0.0.1:11434",
               "model": "qwen3:0.6b-q4_K_M", "timeout_s": 2.5,
               "num_predict": 80, "temperature": 0.0}
         sensor = appraisal_mod.ollama_sensor(cfg)
@@ -436,12 +448,57 @@ class TestAppraisal(unittest.TestCase):
             result = sensor("тестовое сообщение")
 
         self.assertEqual(result, payload)
-        self.assertEqual(captured["url"], "http://host.docker.internal:11435/api/generate")
+        self.assertEqual(captured["url"], "http://127.0.0.1:11434/api/generate")
         self.assertEqual(captured["body"]["model"], "qwen3:0.6b-q4_K_M")
         self.assertIn("format", captured["body"])
         self.assertEqual(captured["body"]["format"]["properties"]["valence"]["enum"],
                          [-2, -1, 0, 1, 2])
         self.assertEqual(captured["timeout"], 2.5)
+
+    def test_llamacpp_sensor_parses_schema_conformant_response(self):
+        """Мок HTTP-ответа llama-server: /completion возвращает {"content": "<json>"}.
+        Рабочий рантайм L-1 — llama.cpp; сенсор обязан быть тестируем без сети."""
+        payload = {"valence": 1, "threat": 0, "novelty": 2, "social_warmth": 1,
+                  "loss": 0, "agency_blocked": False}
+
+        class FakeResp:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self):
+                return json.dumps({"content": json.dumps(payload)}).encode("utf-8")
+
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResp()
+
+        cfg = {"api": "llamacpp", "base_url": "http://127.0.0.1:8080",
+               "timeout_s": 8.0, "num_predict": 96, "temperature": 0.0}
+        sensor = appraisal_mod.make_sensor(cfg)
+
+        with unittest.mock.patch("urllib.request.urlopen", fake_urlopen):
+            result = sensor("тестовое сообщение")
+
+        self.assertEqual(result, payload)
+        self.assertEqual(captured["url"], "http://127.0.0.1:8080/completion")
+        self.assertIn("json_schema", captured["body"])
+        self.assertEqual(captured["body"]["json_schema"]["properties"]["valence"]["enum"],
+                         [-2, -1, 0, 1, 2])
+        self.assertTrue(captured["body"]["cache_prompt"])
+        self.assertEqual(captured["body"]["n_predict"], 96)
+        self.assertEqual(captured["timeout"], 8.0)
+
+    def test_make_sensor_dispatch_and_bad_api(self):
+        self.assertTrue(callable(appraisal_mod.make_sensor(
+            {"base_url": "http://x", "model": "m"})))  # default -> llamacpp
+        self.assertTrue(callable(appraisal_mod.make_sensor(
+            {"api": "ollama", "base_url": "http://x", "model": "m"})))
+        with self.assertRaises(ValueError):
+            appraisal_mod.make_sensor({"api": "vllm", "base_url": "http://x"})
 
     def test_ollama_sensor_failure_becomes_null_appraisal_via_appraiser(self):
         """Отказ сенсора (таймаут, не-200, битый JSON) не должен двигать
@@ -459,6 +516,102 @@ class TestAppraisal(unittest.TestCase):
 
         self.assertTrue(result.is_null())
         self.assertEqual(ap.invalid_count, 1)
+
+    def test_lexical_appraise_reads_common_signals(self):
+        from motus.lexicon_l1 import lexical_appraise
+        pos = lexical_appraise("Ты мне очень помог, наконец-то всё заработало, спасибо!")
+        self.assertGreater(pos.valence, 0)
+        self.assertGreater(pos.social_warmth, 0)
+        self.assertEqual(pos.threat, 0)
+
+        neg = lexical_appraise("да сколько можно, ты опять всё испортил, достал уже")
+        self.assertLess(neg.valence, 0)
+        self.assertLess(neg.social_warmth, 0)
+
+        self.assertEqual(lexical_appraise("Осторожно: на проде течёт память, срочно").threat, 2)
+        self.assertTrue(lexical_appraise("застрял, третий час бьюсь и никак не двигается").agency_blocked)
+        self.assertEqual(lexical_appraise("всё, удаляю проект и ухожу, прощай").loss, 2)
+        self.assertGreater(lexical_appraise("нашёл новый подход, никогда о таком не думал").novelty, 0)
+
+    def test_lexical_appraise_neutral_and_empty_are_null(self):
+        from motus.lexicon_l1 import lexical_appraise
+        self.assertTrue(lexical_appraise("Обнови зависимости в проекте до последней версии.").is_null())
+        self.assertTrue(lexical_appraise("").is_null())
+        self.assertTrue(lexical_appraise("   ").is_null())
+
+    def test_lexical_appraise_is_deterministic(self):
+        from motus.lexicon_l1 import lexical_appraise
+        t = "спасибо большое! но опять не получилось, я застрял"
+        self.assertEqual(lexical_appraise(t).__dict__, lexical_appraise(t).__dict__)
+
+    def test_appraiser_mode_default_is_lexical(self):
+        ap = appraisal_mod.Appraiser()
+        self.assertEqual(ap.mode, "lexical")
+        self.assertGreater(ap.appraise_text("огромное спасибо, ты супер!").valence, 0)
+        self.assertFalse(ap.last_failed)
+
+    def test_appraiser_mode_off_always_null(self):
+        ap = appraisal_mod.Appraiser(mode="off")
+        self.assertTrue(ap.appraise_text("спасибо, ты гений!").is_null())
+
+    def test_lexical_strict_never_invents_strong_signal(self):
+        """strict-режим: на любом входе не выдаёт threat/loss=2 и agency=True без
+        явных слов, и не ставит |valence|/|warmth| = 2 на одиночном слабом хите."""
+        from motus.lexicon_l1 import lexical_appraise
+        traps = ["ну спасибо, удружил", "я в ярости от заката",
+                 "читаю про панику в учебнике", "удали лог, пожалуйста",
+                 "перезапусти сервис, он завис"]
+        for t in traps:
+            a = lexical_appraise(t, strict=True)
+            self.assertFalse(a.agency_blocked, t)
+            self.assertEqual(a.loss, 0, t)
+            self.assertIn(a.threat, (0, 1), t)
+
+    def test_lexical_strict_fewer_signals_than_normal(self):
+        from motus.lexicon_l1 import lexical_appraise
+        t = "всё отлично, но, пожалуй, сверну проект — надоело"
+        normal = lexical_appraise(t)
+        strict = lexical_appraise(t, strict=True)
+        self.assertLessEqual(_nonzero(strict), _nonzero(normal))
+
+    def test_appraiser_lexical_strict_flag_flows_from_engine(self):
+        cfg = cfg_full()
+        cfg["appraisal"] = {"mode": "lexical", "lexical_strict": True}
+        eng = Engine(cfg, VirtualClock(T0), NullJournal())
+        self.assertTrue(eng.ap.lexical_strict)
+
+    def test_engine_lexical_mode_moves_state_deterministically(self):
+        cfg = cfg_full()
+        eng_a = Engine(cfg, VirtualClock(T0), NullJournal())
+        eng_b = Engine(cfg, VirtualClock(T0), NullJournal())
+        for eng in (eng_a, eng_b):
+            eng.submit_event(Event("user_message", T0, {"text": "ты опять всё сломал, я в бешенстве"}))
+        self.assertEqual(eng_a.state.snapshot(), eng_b.state.snapshot())
+
+    def test_somatic_probe_edge_detects_integrity_drop_once(self):
+        tmp = tempfile.mkdtemp(prefix="motus-probe-")
+        try:
+            somatic_probe.STATE_FILE = __import__("pathlib").Path(tmp) / "prev.json"
+            with unittest.mock.patch.object(somatic_probe, "_read_int", return_value=None):
+                with unittest.mock.patch.object(somatic_probe, "_port_open", return_value=True):
+                    p1 = somatic_probe.collect(18789)
+                self.assertNotIn("integrity_drop", p1)
+                with unittest.mock.patch.object(somatic_probe, "_port_open", return_value=False):
+                    p2 = somatic_probe.collect(18789)   # up -> down
+                    p3 = somatic_probe.collect(18789)   # still down
+            self.assertTrue(p2.get("integrity_drop"))
+            self.assertNotIn("integrity_drop", p3)
+            self.assertFalse(p3["services_ok"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_somatic_probe_payload_feeds_somatic_update(self):
+        payload = {"temp_c": 85.0, "throttled": True, "disk_free_frac": 0.02,
+                   "services_ok": False}
+        s = appraisal_mod.Appraiser.somatic_update(
+            {"energy": 0.7, "integrity": 1.0, "thermal": 0.0}, payload)
+        self.assertGreater(s["thermal"], 0.7)     # горячо + троттлит
+        self.assertLess(s["integrity"], 1.0)      # диск и сервис просели
 
     def test_invalid_schema_falls_to_zero(self):
         for bad in (None, "нет", {"valence": 9}, {"valence": "x"}, {"threat": -1}, 42,
@@ -478,6 +631,26 @@ class TestConfig(unittest.TestCase):
         c["drives"]["FEAR"]["theta_lo"] = c["drives"]["FEAR"]["theta_hi"]
         with self.assertRaises(config.ConfigError):
             config.validate(c)
+
+    def test_non_finite_config_value_rejected(self):
+        for path in (("circadian", "amp"), ("modulator", "k_ne"), ("budget", "capacity")):
+            c = cfg_full()
+            c[path[0]][path[1]] = float("nan")
+            with self.assertRaises(config.ConfigError):
+                config.validate(c)
+        c = cfg_full()
+        c["arousal"]["a0"] = float("inf")
+        with self.assertRaises(config.ConfigError):
+            config.validate(c)
+
+    def test_zero_time_constant_rejected(self):
+        for path in (("context", "tau_s"), ("boredom", "tau_s"), ("separation", "tau_s"),
+                     ("modulator", "tau_s"), ("habituation", "tau_s"),
+                     ("budget", "penalty_tau_s"), ("sleep", "period_s")):
+            c = cfg_full()
+            c[path[0]][path[1]] = 0
+            with self.assertRaises(config.ConfigError):
+                config.validate(c)
 
     def test_rage_repertoire_rejected(self):
         c = cfg_full()
@@ -692,6 +865,50 @@ class TestReplay(unittest.TestCase):
             self.assertGreater(res.ticks, 100)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestNonFiniteHardening(unittest.TestCase):
+    def test_state_from_dict_rejects_nan_snapshot(self):
+        cfg = cfg_full()
+        good = State.initial(cfg, T0).to_dict()
+        self.assertIsInstance(State.from_dict(good), State)
+        bad = copy.deepcopy(good)
+        bad["drives"]["FEAR"] = float("nan")
+        with self.assertRaises(ValueError):
+            State.from_dict(bad)
+        bad2 = copy.deepcopy(good)
+        bad2["tokens"] = float("inf")
+        with self.assertRaises(ValueError):
+            State.from_dict(bad2)
+
+    def test_state_from_dict_ignores_unknown_keys(self):
+        cfg = cfg_full()
+        d = State.initial(cfg, T0).to_dict()
+        d["_future_field"] = 123
+        self.assertIsInstance(State.from_dict(d), State)
+
+    def test_daemon_discards_corrupt_snapshot_loudly(self):
+        from motus.daemon import Service
+        tmp = tempfile.mkdtemp(prefix="motus-corrupt-")
+        try:
+            with open(os.path.join(tmp, "state.json"), "w", encoding="utf-8") as fh:
+                fh.write('{"t": 1.0, "drives": {"FEAR": NaN}}')
+            svc = Service(cfg_full(), tmp)
+            kinds = [r["kind"] for r in Journal(os.path.join(tmp, "journal")).read_all()]
+            self.assertIn("error", kinds)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "state.json.corrupt")))
+            self.assertTrue(svc.engine.state.has_finite_vector())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_engine_tick_self_heals_non_finite_vector(self):
+        cfg = cfg_full()
+        eng = Engine(cfg, VirtualClock(T0), NullJournal())
+        eng.state.drives["FEAR"] = float("nan")
+        eng.state.modulators["ne"] = float("inf")
+        d = eng.tick(T0 + 60)
+        self.assertTrue(eng.state.has_finite_vector())
+        self.assertIn(d.gate.regime, ("baseline", *cfg["drives"]))
 
 
 if __name__ == "__main__":

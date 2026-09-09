@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+import math
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict
 
 from .config import DRIVES, MODULATORS, SOMATIC
+
+
+def _assert_finite(node: Any, path: str = "state") -> None:
+    if isinstance(node, dict):
+        for k, v in node.items():
+            _assert_finite(v, f"{path}.{k}")
+    elif isinstance(node, bool):
+        pass
+    elif isinstance(node, float) and not math.isfinite(node):
+        raise ValueError(f"нечисловое значение в снапшоте: {path} = {node}")
 
 
 @dataclass
@@ -57,7 +68,23 @@ class State:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "State":
-        return cls(**d)
+        """Восстановить состояние из снапшота. Бросает ValueError при NaN/Inf в
+        любом числовом поле: json.load принимает эти литералы молча, а битый
+        var/state.json (порча SD-карты на Pi — не гипотетика) иначе тихо отравил
+        бы весь вектор. Вызывающий (daemon._load_state) ловит и стартует с чистого
+        состояния, залогировав факт."""
+        _assert_finite(d)
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+    def has_finite_vector(self) -> bool:
+        """Быстрая проверка живого состояния: все драйвы/модуляторы/сома конечны
+        и в разумных пределах. Дешёвый инвариант для tick()."""
+        for v in (*self.drives.values(), *self.modulators.values(),
+                  *self.somatic.values(), self.tokens, self.act_penalty, self.t):
+            if not math.isfinite(v):
+                return False
+        return True
 
     def snapshot(self) -> Dict[str, Any]:
         """Компактный снимок для журнала: округлён, но полон."""

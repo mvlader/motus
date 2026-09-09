@@ -1,0 +1,17 @@
+# Разовый запуск датчика железа (deploy/somatic_probe.py) — дёргается таймером
+# motus-somatic.timer. Внутри контейнера grach, тот же loopback до motusd.
+# Путь как у motusd.service — плейсхолдер под клон в ~openclaw.
+[Unit]
+Description=MOTUS — опрос датчиков железа
+After=motusd.service
+Wants=motusd.service
+
+[Service]
+Type=oneshot
+User=openclaw
+# StateDirectory переживает между запусками oneshot — там probe помнит прошлый
+# опрос, чтобы слать integrity_drop только на фронте «стало плохо».
+StateDirectory=motus-somatic
+Environment=MOTUS_PROBE_STATE=%S/motus-somatic/prev.json
+ExecStart=/usr/bin/python3 /home/openclaw/motus/deploy/somatic_probe.py
+NoNewPrivileges=yes

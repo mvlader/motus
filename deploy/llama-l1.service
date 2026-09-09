@@ -1,0 +1,38 @@
+# llama.cpp llama-server под модель L-1 (оценщик сигнала MOTUS).
+# Ставится ВНУТРИ Incus-контейнера grach, рядом с openclaw и motusd — все трое
+# ходят друг к другу по 127.0.0.1, наружу контейнера этот порт не публикуется.
+#
+# Бинарь: prebuilt arm64 из релизов ggml-org/llama.cpp, распакован в /opt/llama.cpp
+#   (ggml делает runtime-диспетч CPU-вариантов → на Cortex-A76 берёт ядра с dotprod).
+# Модель: GGUF на бинд-маунте /var/lib/llama-models (host /mnt/torrents/llama-models),
+#   поэтому не попадает в ночные снапшоты grach и переживает пересборку контейнера.
+# Выбор модели/кванта и цифры бенчмарка — docs/04-model-l1.md.
+
+[Unit]
+Description=llama-server — модель L-1 MOTUS
+After=network-online.target
+
+[Service]
+Type=simple
+User=openclaw
+ExecStart=/opt/llama.cpp/llama-server \
+  -m /var/lib/llama-models/Qwen3-1.7B-Q4_K_M.gguf \
+  --host 127.0.0.1 --port 8080 \
+  --threads 3 --ctx-size 2048 --parallel 1 \
+  --no-webui
+# -t 3: одно ядро из четырёх оставлено openclaw и motusd. L-1 — фоновый сенсор,
+# ему не нужен приоритет над диалогом.
+Nice=5
+Restart=on-failure
+RestartSec=5
+# Первый инференс после старта грузит ~1.1 ГБ весов с диска — на Pi 5 это 15–25 с,
+# больше любого разумного timeout_s. motusd при enabled=true сам делает прогревающий
+# вызов в фоне на старте (motus/daemon.py), поэтому к первому реальному сообщению
+# сервер уже горячий; отдельного ExecStartPost здесь не нужно.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/llama-models
+
+[Install]
+WantedBy=default.target

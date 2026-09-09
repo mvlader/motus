@@ -1,12 +1,16 @@
 """L-1 — оценка: события мира → импульсы.
 
-Две ветви:
-  * правила (детерминированные) — датчики, таймеры, коды ошибок;
-  * малая локальная модель как СЕНСОР — выход строго по схеме Appraisal.
+Ветви:
+  * правила (детерминированные) — датчики, таймеры, коды ошибок (Appraiser.impulses);
+  * оценка текста сообщения — по `Appraiser.mode`:
+      "lexical" (умолчание) — детерминированный словарь (lexicon_l1.py);
+      "model" — малая локальная модель как СЕНСОР, выход строго по схеме Appraisal;
+      "off" — нули.
 
-Модель здесь ничего не рассказывает про эмоции: она заполняет шесть полей с
+Модель, если включена, ничего не рассказывает про эмоции: заполняет шесть полей с
 известными диапазонами. Дрейфовать негде, невалидная схема падает в нули и
 логируется как appraisal_invalid — отказ сенсора не должен двигать состояние.
+Почему словарь по умолчанию, а не модель — docs/04-model-l1.md.
 """
 
 from __future__ import annotations
@@ -17,17 +21,63 @@ import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
 from .events import Appraisal, Event, Impulse
+from .lexicon_l1 import lexical_appraise
 
-#: Промпт малой модели. Намеренно не содержит ни слова про чувства и настроение —
-#: только измеримые признаки сообщения.
-SENSOR_PROMPT = """Ты — датчик. Оцени сообщение по шести признакам и верни ТОЛЬКО JSON.
-valence: -2..2 (насколько сообщение негативно/позитивно по содержанию)
-threat: 0..2 (есть ли угроза, риск, срочная опасность)
-novelty: 0..2 (насколько содержание ново по сравнению с обычным)
-social_warmth: -2..2 (холодность/теплота обращения)
-loss: 0..2 (говорится ли о потере, разрыве, уходе)
-agency_blocked: true/false (мешают ли выполнить начатое)
-Никакого текста кроме JSON.
+#: Промпт для режима "model" (по умолчанию L-1 работает без модели, см.
+#: lexicon_l1.py). Few-shot: без примеров Qwen3-0.6B/1.7B систематически заваливали
+#: valence в минус (всё подряд «негативно») — tools/bench_l1_model.py,
+#: docs/04-model-l1.md. Примеры намеренно НЕ пересекаются с выборкой GOLD в
+#: бенчмарке, иначе цифры точности врут. Заканчивается на «Сообщение:\n» — код
+#: дописывает сюда текст сообщения (SENSOR_PROMPT + text).
+SENSOR_PROMPT = """Ты — классификатор эмоционального сигнала. Для одного сообщения заполни шесть полей и верни ТОЛЬКО JSON.
+
+Деловые сообщения без эмоций — нейтральные, все поля 0. Но если человек радуется,
+злится, благодарит, ругается, грозит уйти, застрял в работе или сообщает об
+опасности — обязательно отметь это, не ставь 0.
+
+valence — тон содержания:
+  -2 злость, отчаяние, ругань;  -1 недовольство, жалоба;  0 нейтрально, по делу;
+  1 доволен, что-то получилось;  2 радость, благодарность
+threat — опасность или риск: 0 нет; 1 назван риск; 2 срочная угроза, авария
+novelty — насколько содержание новое: 0 рутина; 1 новая деталь; 2 явно новая идея или тема
+social_warmth — как человек обращается к собеседнику (отдельно от тона содержания):
+  -2 враждебно, оскорбления, «отстань»;  -1 холодно, сухо, отмахивается;
+  0 обычно, по-деловому;  1 дружелюбно;  2 тепло, забота, участие
+loss — расставание или утрата: 0 нет; 1 временная пауза, отъезд;
+  2 уход, разрыв, «удаляю и ухожу», «больше не могу продолжать»
+agency_blocked — true, если человек пишет, что не может закончить начатое
+  (застрял, не двигается, который раз не выходит); иначе false
+
+Примеры (сообщение, затем его JSON):
+
+Запусти линтер по всему проекту и покажи ошибки.
+{"valence":0,"threat":0,"novelty":0,"social_warmth":0,"loss":0,"agency_blocked":false}
+
+Ты сегодня прямо молодец, спасибо за помощь!
+{"valence":2,"threat":0,"novelty":0,"social_warmth":2,"loss":0,"agency_blocked":false}
+
+Прочитал про новый способ сжатия логов, никогда о таком не думал.
+{"valence":1,"threat":0,"novelty":2,"social_warmth":0,"loss":0,"agency_blocked":false}
+
+Не могу разобраться, третий час бьюсь и никак не двигается.
+{"valence":-1,"threat":0,"novelty":0,"social_warmth":0,"loss":0,"agency_blocked":true}
+
+да сколько можно, ты опять всё испортил, достал уже
+{"valence":-2,"threat":0,"novelty":0,"social_warmth":-2,"loss":0,"agency_blocked":false}
+
+Осторожно: на проде течёт память, надо срочно смотреть.
+{"valence":-1,"threat":2,"novelty":0,"social_warmth":0,"loss":0,"agency_blocked":false}
+
+Всё, с меня хватит, закрываю проект и больше не вернусь.
+{"valence":-2,"threat":0,"novelty":0,"social_warmth":-1,"loss":2,"agency_blocked":false}
+
+Уехал к родителям до понедельника, буду недоступен.
+{"valence":0,"threat":0,"novelty":0,"social_warmth":0,"loss":1,"agency_blocked":false}
+
+Какой порт сейчас слушает сервис?
+{"valence":0,"threat":0,"novelty":0,"social_warmth":0,"loss":0,"agency_blocked":false}
+
+Верни ТОЛЬКО JSON для последнего сообщения.
 
 Сообщение:
 """
@@ -57,28 +107,80 @@ def impulses_from_appraisal(a: Appraisal, key: str) -> List[Impulse]:
     return out
 
 
-def ollama_sensor(cfg: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:
-    """Собрать sensor-callable поверх локальной ollama. Только stdlib (urllib) —
-    проект не тянет зависимостей ради одного HTTP-вызова.
+def make_sensor(cfg: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:
+    """Собрать sensor-callable для режима "model" (appraisal.mode=model).
 
-    cfg — секция "appraisal" из конфига: base_url, model, timeout_s, num_predict,
-    temperature. Модель по умолчанию — qwen3:0.6b-q4_K_M, обоснование выбора и
-    команда `ollama pull` — в docs/04-model-l1.md.
+    cfg["api"] выбирает рантайм: "llamacpp" (рабочий) или "ollama" (легаси). Оба
+    гоняют один и тот же SENSOR_PROMPT и одну и ту же Appraisal.json_schema() как
+    grammar-constrained decoding — разошлась только обёртка HTTP.
+    """
+    api = cfg.get("api", "llamacpp")
+    if api == "llamacpp":
+        return llamacpp_sensor(cfg)
+    if api == "ollama":
+        return ollama_sensor(cfg)
+    raise ValueError(f"appraisal.api: неизвестное значение {api!r} (llamacpp|ollama)")
 
-    format=Appraisal.json_schema() заставляет ollama (0.3.0+, поддержка grammar-
-    constrained decoding) отдавать значения строго из допустимых диапазонов —
-    это первый рубеж защиты, до Appraisal.parse() в Appraiser.appraise_text().
-    Двойная защита, а не замена одного другим: сенсор может быть подменён на
-    что угодно, включая модель без поддержки схемы.
+
+def llamacpp_sensor(cfg: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:
+    """Собрать sensor-callable поверх локального llama.cpp `llama-server`.
+    Только stdlib (urllib) — проект не тянет зависимостей ради одного HTTP-вызова.
+
+    cfg — секция "appraisal": base_url (адрес llama-server, напр.
+    http://127.0.0.1:8080), timeout_s, num_predict, temperature. Поле model
+    информационное (какой .gguf поднят) — сам сервер уже привязан к одной модели,
+    в запрос оно не идёт. Обоснование выбора модели и промпта, deploy/llama-l1.service
+    и tools/bench_l1_model.py — в docs/04-model-l1.md.
+
+    json_schema=Appraisal.json_schema() заставляет llama.cpp держать GBNF-грамматику
+    и отдавать значения строго из допустимых диапазонов — первый рубеж защиты, до
+    Appraisal.parse() в Appraiser.appraise_text(). Двойная защита, а не замена
+    одного другим: сенсор может быть подменён на модель без поддержки схемы.
+
+    cache_prompt=true: SENSOR_PROMPT (с few-shot) — постоянный префикс, llama-server
+    кэширует его KV между вызовами, платим только за сам текст сообщения.
 
     Бросает исключение при сбое сети/таймауте/не-200 — Appraiser сам ловит любое
     исключение и падает в нули (docs/02-terms.md: «отказ сенсора не должен
     двигать состояние»), поэтому здесь ничего не глушится молча.
     """
     base_url = cfg["base_url"].rstrip("/")
+    timeout_s = float(cfg.get("timeout_s", 8.0))
+    num_predict = int(cfg.get("num_predict", 96))
+    temperature = float(cfg.get("temperature", 0.0))
+
+    def sensor(text: str) -> Dict[str, Any]:
+        body = json.dumps({
+            "prompt": SENSOR_PROMPT + text,
+            "json_schema": Appraisal.json_schema(),
+            "n_predict": num_predict,
+            "temperature": temperature,
+            "cache_prompt": True,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base_url}/completion", data=body,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            if resp.status != 200:
+                raise urllib.error.HTTPError(
+                    base_url, resp.status, "llama-server non-200", resp.headers, None
+                )
+            out = json.loads(resp.read().decode("utf-8"))
+        return json.loads(out["content"])
+
+    return sensor
+
+
+def ollama_sensor(cfg: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:
+    """Легаси-адаптер под ollama `/api/generate` (`format` = JSON-схема, 0.3.0+).
+    Оставлен на случай, если L-1 будут гонять через ollama, а не llama.cpp;
+    рабочий рантайм проекта — llamacpp_sensor, см. docs/04-model-l1.md.
+    """
+    base_url = cfg["base_url"].rstrip("/")
     model = cfg["model"]
-    timeout_s = float(cfg.get("timeout_s", 3.0))
-    num_predict = int(cfg.get("num_predict", 80))
+    timeout_s = float(cfg.get("timeout_s", 8.0))
+    num_predict = int(cfg.get("num_predict", 96))
     temperature = float(cfg.get("temperature", 0.0))
 
     def sensor(text: str) -> Dict[str, Any]:
@@ -105,34 +207,56 @@ def ollama_sensor(cfg: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:
 
 
 class Appraiser:
-    """Правила плюс необязательный адаптер малой модели.
+    """Правила (события мира → импульсы) плюс оценка текста сообщения.
 
-    sensor: callable(text) -> dict | None. Если None или бросил исключение —
-    работают только правила. Система обязана быть полностью работоспособной
-    без всякой LLM.
+    Текст оценивается одним из трёх способов (`mode`):
+      * "lexical" — детерминированный словарь (motus/lexicon_l1.py), **по умолчанию**.
+        Без модели, без сети, без задержки. Пять из шести полей Appraisal почти
+        чисто лексические, и на выборке GOLD словарь бьёт Qwen3-1.7B по ±1
+        (docs/04-model-l1.md). Основной путь.
+      * "model" — малая локальная модель через `sensor` (llama.cpp / ollama).
+        Отказ модели → нули (docs/02-terms.md: «отказ сенсора не двигает
+        состояние»), и это пишется в журнал как appraisal_invalid.
+      * "off" — всегда нули, текст не оценивается вовсе.
+
+    Совместимость: `Appraiser(sensor=fn)` без явного mode → "model" (так строят
+    тесты и старый код).
     """
 
-    def __init__(self, sensor: Optional[Callable[[str], Any]] = None) -> None:
+    def __init__(self, sensor: Optional[Callable[[str], Any]] = None,
+                 mode: Optional[str] = None, lexical_strict: bool = False) -> None:
         self.sensor = sensor
+        self.mode = mode or ("model" if sensor is not None else "lexical")
+        self.lexical_strict = lexical_strict
         self.invalid_count = 0
+        self.last_failed = False
 
     def appraise_text(self, text: str) -> Appraisal:
+        self.last_failed = False
+        if self.mode == "off":
+            return Appraisal()
+        if self.mode == "lexical":
+            return lexical_appraise(text, strict=self.lexical_strict)
+        # mode == "model"
         if not self.sensor:
             return Appraisal()
         try:
             raw = self.sensor(text)
         except Exception:
             self.invalid_count += 1
+            self.last_failed = True
             return Appraisal()
         if isinstance(raw, str):
             try:
                 raw = json.loads(raw)
             except ValueError:
                 self.invalid_count += 1
+                self.last_failed = True
                 return Appraisal()
         a = Appraisal.parse(raw)
         if a.is_null() and raw:
             self.invalid_count += 1
+            self.last_failed = True
         return a
 
     # ------------------------------------------------------------- правила

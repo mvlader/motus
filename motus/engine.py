@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -72,7 +73,13 @@ class Engine:
         self.vb = Verbalizer(cfg, self.h)
         self.bg = Budget(cfg)
         self.rep = Repertoire(cfg, self.h)
-        self.ap = Appraiser(sensor)
+        # Явно переданный sensor означает режим "model" (так строят тесты и
+        # daemon при appraisal.mode=model); иначе — режим из конфига,
+        # по умолчанию "lexical" (детерминированный словарь, docs/04-model-l1.md).
+        ap_cfg = cfg.get("appraisal", {})
+        ap_mode = "model" if sensor is not None else ap_cfg.get("mode", "lexical")
+        self.ap = Appraiser(sensor, mode=ap_mode,
+                            lexical_strict=bool(ap_cfg.get("lexical_strict", False)))
         self.state = st or State.initial(cfg, clock.now())
         self._last_regime = self.state.regime
         self._last_card = ""
@@ -106,12 +113,10 @@ class Engine:
             text = ev.payload.pop("text")
             if "appraisal" not in ev.payload:
                 a = self.ap.appraise_text(text)
-                # Пусто, потому что сенсор выключен (по умолчанию) — это штатно,
-                # не сбой. Пусто, потому что сенсор ОТВЕЧАЛ и не смог — это сбой,
-                # его стоит видеть в журнале. Не путать одно с другим: иначе при
-                # выключенном appraisal (умолчание!) на каждое сообщение летит
-                # ложная запись appraisal_invalid.
-                if self.ap.sensor is not None and a.is_null() and text.strip():
+                # appraisal_invalid — только когда режим "model" и модель РЕАЛЬНО
+                # отказала (таймаут, битый JSON, пустой ответ на непустой текст).
+                # Штатный ноль от словаря или от mode=off сбоем не считается.
+                if self.ap.last_failed and text.strip():
                     self.journal.write("appraisal_invalid", ev.t, {"chars": len(text)})
                 ev.payload["appraisal"] = {
                     "valence": a.valence, "threat": a.threat, "novelty": a.novelty,
@@ -183,6 +188,19 @@ class Engine:
     def tick(self, t: Optional[float] = None) -> Decision:
         st = self.state
         t = self.clock.now() if t is None else t
+        if not st.has_finite_vector():
+            # Вектор стал NaN/Inf (порча снапшота, проскочивший коэффициент).
+            # Само-восстановление: числа — к дефолтам конфига, часы сохраняем.
+            # Тихо продолжать с NaN хуже, чем потерять накопленное; вечно падать
+            # на каждом тике — тоже.
+            self.journal.write("error", t, {"what": "non_finite_state_reset"})
+            st.drives = {n: self.cfg["drives"][n]["setpoint"] for n in self.cfg["drives"]}
+            st.modulators = dict(self.cfg["temperament"])
+            st.somatic = {k: self.cfg["somatic"][k] for k in st.somatic}
+            st.tokens = float(self.cfg["budget"]["capacity"])
+            st.act_penalty = 0.0
+            if not isinstance(st.t, (int, float)) or not math.isfinite(st.t):
+                st.t = t
         dt = self.h.advance(st, t)
         self.bg.refill(st, dt)
         if self.bg.check_unanswered(st):

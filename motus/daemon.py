@@ -4,9 +4,9 @@
 (openclaw, cron, дашборд) обращается к нему по HTTP на localhost.
 
 Почему демон, а не библиотека: у состояния должен быть ровно один владелец.
-openclaw живёт в Docker, перезапускается, каждая сессия — отдельный процесс; N копий
-вектора разойдутся, и кто последний записал — тот и прав. Плюс тикать нужно и когда
-сессий нет вообще, иначе время между разговорами для системы не существует.
+openclaw (в контейнере grach) перезапускается, каждая сессия — отдельный процесс;
+N копий вектора разойдутся, и кто последний записал — тот и прав. Плюс тикать нужно
+и когда сессий нет вообще, иначе время между разговорами для системы не существует.
 """
 
 from __future__ import annotations
@@ -40,18 +40,49 @@ class Service:
         self.lock = threading.Lock()
         st = self._load_state()
         sensor = None
-        if cfg.get("appraisal", {}).get("enabled"):
-            sensor = appraisal.ollama_sensor(cfg["appraisal"])
+        if cfg.get("appraisal", {}).get("mode") == "model":
+            sensor = appraisal.make_sensor(cfg["appraisal"])
+            self._warm_up_sensor(sensor)
+        # sensor=None → Engine берёт appraisal.mode из конфига (lexical|off).
         self.engine = Engine(cfg, self.clock, self.journal, st, sensor=sensor)
         self.started = time.time()
         self.next_tick_s = float(cfg["heartbeat"]["tick_min_s"])
         self._stop = threading.Event()
 
+    @staticmethod
+    def _warm_up_sensor(sensor: Any) -> None:
+        """Фоновый прогрев L-1: первый вызов llama-server грузит ~1 ГБ весов и
+        считает весь few-shot промпт без кэша — это 15–25 с, дольше любого
+        timeout_s. Прогнать один холостой запрос в отдельном потоке, чтобы к
+        первому реальному сообщению сервер был горячим. Best-effort: сбой (сервер
+        ещё не поднялся, выключен) молча игнорируется — appraise_text всё равно
+        переживёт отказ сенсора."""
+        def run() -> None:
+            for _ in range(6):
+                try:
+                    sensor("прогрев")
+                    return
+                except Exception:
+                    time.sleep(10)
+        threading.Thread(target=run, name="l1-warmup", daemon=True).start()
+
     def _load_state(self) -> Optional[State]:
         try:
             with open(self.state_path, "r", encoding="utf-8") as fh:
-                st = State.from_dict(json.load(fh))
-        except (OSError, ValueError, TypeError):
+                raw = fh.read()
+        except OSError:
+            return None
+        try:
+            st = State.from_dict(json.loads(raw))
+        except (ValueError, TypeError) as exc:
+            # Битый или NaN-отравленный снапшот. Стартуем с чистого состояния,
+            # но громко: молча потерять накопленное состояние тоже плохо.
+            self.journal.write("error", time.time(),
+                               {"what": "corrupt_state_snapshot", "detail": str(exc)})
+            try:
+                os.replace(self.state_path, self.state_path + ".corrupt")
+            except OSError:
+                pass
             return None
         # Простой снапшота не отменяет времени: до текущего момента состояние
         # доводится обычной релаксацией на первом же тике.

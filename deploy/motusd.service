@@ -1,16 +1,29 @@
+# Этот юнит ставится ВНУТРИ Incus-контейнера `grach`, рядом с openclaw, —
+# не на голом хосте Pi. Хуки openclaw обращаются к motusd по 127.0.0.1:18790
+# внутри того же контейнера, без Incus-проксирования.
+#
+# WorkingDirectory/User зависят от того, как код MOTUS попадёт в grach
+# (отдельный клон в ~openclaw, bind-mount с хоста, или пакет-плагин openclaw) —
+# это ещё не зафиксировано, см. docs/04-model-l1.md, раздел «Где это работает».
+# Значения ниже — плейсхолдер под клон в домашнем каталоге openclaw.
 [Unit]
 Description=MOTUS — слой мотивации и поведенческого управления
-After=network-online.target
+After=network-online.target llama-l1.service
+# Нужно только при appraisal.mode=model. По умолчанию (mode=lexical) L-1
+# оценивает текст словарём, llama-l1 не требуется — и если он disabled,
+# этот Wants просто ничего не делает. Wants, не Requires: даже в режиме model
+# motusd работоспособен без сенсора (appraise_text() падает в нули).
+Wants=llama-l1.service
 
 [Service]
 Type=simple
-User=mvlader
-WorkingDirectory=/home/mvlader/claude/motus
+User=openclaw
+WorkingDirectory=/home/openclaw/motus
 ExecStart=/usr/bin/python3 -m motus.daemon --host 127.0.0.1 --port 18790
 Restart=on-failure
 RestartSec=5
 # Демон владеет только своим каталогом состояния.
-ReadWritePaths=/home/mvlader/claude/motus/var
+ReadWritePaths=/home/openclaw/motus/var
 NoNewPrivileges=yes
 PrivateTmp=yes
 
