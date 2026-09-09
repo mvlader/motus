@@ -1,0 +1,163 @@
+{
+  "schema": 1,
+  "_comment": "Все значения — начальная догадка, не результат калибровки. Калибровать через replay.py.",
+  "drives": {
+    "SEEKING": {
+      "kind": "tonic",
+      "setpoint": 0.35,
+      "tau_relax_s": 14400,
+      "theta_hi": 0.62,
+      "theta_lo": 0.45,
+      "priority": 2,
+      "gain": 1.0
+    },
+    "CARE": {
+      "kind": "tonic",
+      "setpoint": 0.3,
+      "tau_relax_s": 21600,
+      "theta_hi": 0.6,
+      "theta_lo": 0.44,
+      "priority": 3,
+      "gain": 1.0
+    },
+    "PLAY": {
+      "kind": "tonic",
+      "setpoint": 0.2,
+      "tau_relax_s": 10800,
+      "theta_hi": 0.58,
+      "theta_lo": 0.4,
+      "priority": 1,
+      "gain": 1.0
+    },
+    "FEAR": {
+      "kind": "phasic",
+      "setpoint": 0.0,
+      "tau_relax_s": 720,
+      "theta_hi": 0.45,
+      "theta_lo": 0.28,
+      "priority": 5,
+      "gain": 1.0
+    },
+    "RAGE": {
+      "kind": "phasic",
+      "setpoint": 0.0,
+      "tau_relax_s": 480,
+      "theta_hi": 0.5,
+      "theta_lo": 0.3,
+      "priority": 5,
+      "gain": 1.0
+    },
+    "PANIC": {
+      "kind": "phasic",
+      "setpoint": 0.0,
+      "tau_relax_s": 2700,
+      "theta_hi": 0.5,
+      "theta_lo": 0.32,
+      "priority": 4,
+      "gain": 1.0
+    }
+  },
+  "appetitive": [
+    "SEEKING",
+    "CARE",
+    "PLAY"
+  ],
+  "aversive": [
+    "FEAR",
+    "RAGE",
+    "PANIC"
+  ],
+  "temperament": {
+    "da": 0.5,
+    "ne": 0.5,
+    "ht5": 0.5
+  },
+  "modulator": {
+    "tau_s": 43200,
+    "k_da": 0.6,
+    "k_ne": 0.5,
+    "k_ht5": 0.4
+  },
+  "thresholds": {
+    "k_ht5": 0.15,
+    "k_da": 0.1,
+    "dwell_s": 180
+  },
+  "arousal": {
+    "a0": 0.25,
+    "k_ne": 0.5,
+    "k_aversive": 0.6,
+    "k_energy": 0.3
+  },
+  "circadian": {
+    "amp": 0.18,
+    "peak_hour": 15.0,
+    "weight": 0.6
+  },
+  "separation": {
+    "grace_s": 3600,
+    "tau_s": 14400,
+    "max": 0.75,
+    "_note": "Альфа-функция: протест → отчаяние → отстранение. Пик через grace+tau после последнего контакта, дальше спад. Иначе PANIC защёлкивается навсегда и монополизирует режим на всё время отсутствия человека."
+  },
+  "context": {
+    "tau_s": 21600,
+    "band_fresh": 0.7,
+    "band_aging": 0.3,
+    "band_stale": 0.05
+  },
+  "habituation": {
+    "kappa": 3.0,
+    "tau_s": 5400
+  },
+  "budget": {
+    "capacity": 3.0,
+    "refill_per_s": 0.0002777778,
+    "refractory_s": 1200,
+    "penalty_delta": 0.15,
+    "penalty_max": 0.6,
+    "penalty_tau_s": 86400,
+    "unanswered_after_s": 5400,
+    "_note": "penalty_tau_s намеренно велик: штраф за молчание должен сниматься ВОЗВРАЩЕНИЕМ пользователя, а не просто течением времени."
+  },
+  "heartbeat": {
+    "_units": "theta_task и theta_act — в НОРМИРОВАННОЙ активации a = x / theta_hi_eff",
+    "tick_min_s": 45,
+    "tick_max_s": 600,
+    "gamma": 2.0,
+    "theta_task": 1.0,
+    "theta_act": 1.25,
+    "task_min_interval_s": 600
+  },
+  "consummation": {
+    "rho_full": 0.55,
+    "rho_part": 0.15,
+    "novelty_min": 0.35
+  },
+  "verbalizer": {
+    "max_chars": 320
+  },
+  "sleep": {
+    "period_s": 86400,
+    "max_arousal": 0.35,
+    "lambda": 0.3
+  },
+  "somatic": {
+    "energy": 0.7,
+    "integrity": 1.0,
+    "thermal": 0.0
+  },
+  "repertoire": {
+    "min_score": 0.3,
+    "task_ttl_s": 3600,
+    "max_queue": 3,
+    "_note": "min_score — порог насыщения репертуаром: если привыкание опустило лучший шаблон ниже, задача не выдаётся вовсе. expiry_penalty — надбавка к привыканию за задачу, которая протухла невыполненной: если я раз за разом ставлю себе задачу и не делаю её, правильный ответ — перестать её ставить, а не ставить чаще.",
+    "expiry_penalty": 2.0
+  },
+  "boredom": {
+    "grace_s": 7200,
+    "tau_s": 21600,
+    "max": 0.45,
+    "_note": "Скука: сетпоинт SEEKING растёт от времени без нового входа. Без неё тонические драйвы недостижимы — они сидят на сетпоинте ниже порога и режим SEEKING не наступает никогда."
+  }
+}

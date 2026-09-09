@@ -1,0 +1,18 @@
+[Unit]
+Description=MOTUS — слой мотивации и поведенческого управления
+After=network-online.target
+
+[Service]
+Type=simple
+User=mvlader
+WorkingDirectory=/home/mvlader/claude/motus
+ExecStart=/usr/bin/python3 -m motus.daemon --host 127.0.0.1 --port 18790
+Restart=on-failure
+RestartSec=5
+# Демон владеет только своим каталогом состояния.
+ReadWritePaths=/home/mvlader/claude/motus/var
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

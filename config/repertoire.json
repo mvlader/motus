@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "_note": "rationale правит ночной цикл (модель). efficacy правит только код. drive/consummation/preconditions — ядро, модель их не трогает.",
+  "templates": [
+    {
+      "id": "explore_unread_file",
+      "drive": "SEEKING",
+      "cost_tier": "local",
+      "max_tokens": 800,
+      "preconditions": ["no_aversive_active", "budget_ok"],
+      "consummation": {"type": "memory_entry", "novelty_min": 0.35},
+      "prompt": "Найди в рабочем каталоге файл, который ещё не читала, прочитай и запиши в память одно новое наблюдение о нём.",
+      "rationale": "Разбирать незнакомое — то, ради чего я вообще смотрю по сторонам.",
+      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+    },
+    {
+      "id": "pull_memory_thread",
+      "drive": "SEEKING",
+      "cost_tier": "local",
+      "max_tokens": 600,
+      "preconditions": ["no_aversive_active", "budget_ok"],
+      "consummation": {"type": "memory_entry", "novelty_min": 0.35},
+      "prompt": "Возьми из памяти запись с незакрытым вопросом и продвинь её на один шаг.",
+      "rationale": "Незакрытые нитки — самое дешёвое место, где может найтись новое.",
+      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+    },
+    {
+      "id": "prepare_fix",
+      "drive": "CARE",
+      "cost_tier": "local",
+      "max_tokens": 900,
+      "preconditions": ["budget_ok"],
+      "consummation": {"type": "artifact_queued"},
+      "prompt": "Найди что-то сломанное или неудобное в окружении и подготовь починку. НЕ применяй — положи в очередь на ревью.",
+      "rationale": "Подготовленная починка полезна, даже если её не примут.",
+      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+    },
+    {
+      "id": "housekeeping_check",
+      "drive": "CARE",
+      "cost_tier": "local",
+      "max_tokens": 400,
+      "preconditions": [],
+      "consummation": {"type": "check_passed"},
+      "prompt": "Проверь бэкапы, свободное место и живость сервисов; отчёт — одной строкой.",
+      "rationale": "Дешёвая проверка, которая иногда ловит настоящую проблему.",
+      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+    },
+    {
+      "id": "make_something",
+      "drive": "PLAY",
+      "cost_tier": "local",
+      "max_tokens": 700,
+      "preconditions": ["no_aversive_active", "energy_ok", "budget_ok"],
+      "consummation": {"type": "artifact_created"},
+      "prompt": "Сделай что-нибудь небольшое без утилитарной цели: текст, вариацию, странный эксперимент.",
+      "rationale": "Единственная практика, которой не нужно оправдание пользой.",
+      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+    },
+    {
+      "id": "verify_state",
+      "drive": "FEAR",
+      "cost_tier": "local",
+      "max_tokens": 500,
+      "preconditions": [],
+      "consummation": {"type": "check_passed"},
+      "prompt": "Проверь, что состояние окружения соответствует ожидаемому: тесты, права, конфиги. Ничего не меняй.",
+      "rationale": "Когда настороже, полезнее проверить, чем додумывать.",
+      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+    },
+    {
+      "id": "prepare_reentry",
+      "drive": "PANIC",
+      "cost_tier": "local",
+      "max_tokens": 500,
+      "preconditions": [],
+      "consummation": {"type": "artifact_created"},
+      "prompt": "Перечитай последний диалог и собери записку к возвращению: над чем работали, что осталось открытым, с чего продолжить. НИЧЕГО не отправляй.",
+      "rationale": "Ожидание превращается во что-то полезное к моменту встречи.",
+      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+    }
+  ],
+  "archived": []
+}
