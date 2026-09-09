@@ -66,6 +66,12 @@ def validate(cfg: Dict[str, Any]) -> None:
         if name not in lex.get("regimes", {}):
             raise ConfigError(f"в лексиконе нет режима {name}")
 
+    ap = cfg.get("appraisal", {})
+    if ap.get("enabled"):
+        for key in ("base_url", "model"):
+            if not ap.get(key):
+                raise ConfigError(f"appraisal.enabled=true, но не задано appraisal.{key}")
+
     for tpl in cfg.get("_repertoire", {}).get("templates", []):
         if tpl["drive"] not in DRIVES:
             raise ConfigError(f"шаблон {tpl['id']}: неизвестный драйв {tpl['drive']}")

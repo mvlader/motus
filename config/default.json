@@ -159,5 +159,14 @@
     "tau_s": 21600,
     "max": 0.45,
     "_note": "Скука: сетпоинт SEEKING растёт от времени без нового входа. Без неё тонические драйвы недостижимы — они сидят на сетпоинте ниже порога и режим SEEKING не наступает никогда."
+  },
+  "appraisal": {
+    "enabled": false,
+    "_note": "Выключено по умолчанию, пока модель не скачана и не проверена руками — см. docs/04-model-l1.md. Включить: enabled=true. Пул: ollama pull qwen3:0.6b-q4_K_M",
+    "base_url": "http://host.docker.internal:11435",
+    "model": "qwen3:0.6b-q4_K_M",
+    "timeout_s": 3.0,
+    "num_predict": 80,
+    "temperature": 0.0
   }
 }

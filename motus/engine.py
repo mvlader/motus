@@ -90,6 +90,35 @@ class Engine:
         if ev.t < self.state.t:
             ev.t = self.state.t  # события из прошлого не отматывают время назад
         self.h.advance(self.state, ev.t)
+
+        if ev.kind == "user_message" and "text" in ev.payload:
+            # Сырой текст пользователя оценивает L-1 (появился в этой сессии —
+            # см. docs/04-model-l1.md) и БЕЗУСЛОВНО выбрасывается: в журнал уходит
+            # только производный результат (6 маленьких чисел), не содержание
+            # сообщения. Безусловно — то есть даже если вызывающий по ошибке
+            # прислал text вместе с уже готовым appraisal: правило «текст не
+            # покидает ядро» не должно иметь обходного пути через чужую ошибку.
+            # Тот же принцип, что «вывод карточки не попадает в память как
+            # текст» — числа наружу, текст остаётся снаружи ядра. Побочный
+            # эффект — реплей остаётся детерминированным и офлайновым: он
+            # читает уже посчитанный appraisal из журнала и никогда не
+            # вызывает сеть повторно.
+            text = ev.payload.pop("text")
+            if "appraisal" not in ev.payload:
+                a = self.ap.appraise_text(text)
+                # Пусто, потому что сенсор выключен (по умолчанию) — это штатно,
+                # не сбой. Пусто, потому что сенсор ОТВЕЧАЛ и не смог — это сбой,
+                # его стоит видеть в журнале. Не путать одно с другим: иначе при
+                # выключенном appraisal (умолчание!) на каждое сообщение летит
+                # ложная запись appraisal_invalid.
+                if self.ap.sensor is not None and a.is_null() and text.strip():
+                    self.journal.write("appraisal_invalid", ev.t, {"chars": len(text)})
+                ev.payload["appraisal"] = {
+                    "valence": a.valence, "threat": a.threat, "novelty": a.novelty,
+                    "social_warmth": a.social_warmth, "loss": a.loss,
+                    "agency_blocked": a.agency_blocked,
+                }
+
         self.journal.write("event", ev.t, ev.to_dict())
 
         if ev.kind == "user_message":

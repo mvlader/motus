@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import json
+import urllib.error
+import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
 from .events import Appraisal, Event, Impulse
@@ -53,6 +55,53 @@ def impulses_from_appraisal(a: Appraisal, key: str) -> List[Impulse]:
     if a.valence > 0 and a.threat == 0:
         out.append(Impulse("PLAY", 0.15 * a.valence / 2.0, f"{key}:positive"))
     return out
+
+
+def ollama_sensor(cfg: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:
+    """Собрать sensor-callable поверх локальной ollama. Только stdlib (urllib) —
+    проект не тянет зависимостей ради одного HTTP-вызова.
+
+    cfg — секция "appraisal" из конфига: base_url, model, timeout_s, num_predict,
+    temperature. Модель по умолчанию — qwen3:0.6b-q4_K_M, обоснование выбора и
+    команда `ollama pull` — в docs/04-model-l1.md.
+
+    format=Appraisal.json_schema() заставляет ollama (0.3.0+, поддержка grammar-
+    constrained decoding) отдавать значения строго из допустимых диапазонов —
+    это первый рубеж защиты, до Appraisal.parse() в Appraiser.appraise_text().
+    Двойная защита, а не замена одного другим: сенсор может быть подменён на
+    что угодно, включая модель без поддержки схемы.
+
+    Бросает исключение при сбое сети/таймауте/не-200 — Appraiser сам ловит любое
+    исключение и падает в нули (docs/02-terms.md: «отказ сенсора не должен
+    двигать состояние»), поэтому здесь ничего не глушится молча.
+    """
+    base_url = cfg["base_url"].rstrip("/")
+    model = cfg["model"]
+    timeout_s = float(cfg.get("timeout_s", 3.0))
+    num_predict = int(cfg.get("num_predict", 80))
+    temperature = float(cfg.get("temperature", 0.0))
+
+    def sensor(text: str) -> Dict[str, Any]:
+        body = json.dumps({
+            "model": model,
+            "prompt": SENSOR_PROMPT + text,
+            "format": Appraisal.json_schema(),
+            "stream": False,
+            "options": {"temperature": temperature, "num_predict": num_predict},
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base_url}/api/generate", data=body,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            if resp.status != 200:
+                raise urllib.error.HTTPError(
+                    base_url, resp.status, "ollama non-200", resp.headers, None
+                )
+            out = json.loads(resp.read().decode("utf-8"))
+        return json.loads(out["response"])
+
+    return sensor
 
 
 class Appraiser:

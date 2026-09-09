@@ -19,7 +19,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional
 
-from . import __version__, config
+from . import __version__, appraisal, config
 from .clock import Clock
 from .engine import Engine
 from .events import Event
@@ -39,7 +39,10 @@ class Service:
         self.clock = Clock()
         self.lock = threading.Lock()
         st = self._load_state()
-        self.engine = Engine(cfg, self.clock, self.journal, st)
+        sensor = None
+        if cfg.get("appraisal", {}).get("enabled"):
+            sensor = appraisal.ollama_sensor(cfg["appraisal"])
+        self.engine = Engine(cfg, self.clock, self.journal, st, sensor=sensor)
         self.started = time.time()
         self.next_tick_s = float(cfg["heartbeat"]["tick_min_s"])
         self._stop = threading.Event()

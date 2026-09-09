@@ -94,3 +94,21 @@ class Appraisal:
             self.valence == 0 and self.threat == 0 and self.novelty == 0
             and self.social_warmth == 0 and self.loss == 0 and not self.agency_blocked
         )
+
+    @classmethod
+    def json_schema(cls) -> Dict[str, Any]:
+        """JSON-схема выхода L-1, сгенерированная из RANGES — одна точка правды с
+        parse(). Передаётся модели как format у ollama: грамматика ограничивает
+        декодирование самим набором допустимых значений, а не только синтаксисом
+        JSON. Это защита до parse(), а не вместо неё — parse() остаётся последним
+        рубежом на случай сенсора, который эту схему не умеет."""
+        props = {
+            name: {"type": "integer", "enum": list(range(lo, hi + 1))}
+            for name, (lo, hi) in cls.RANGES.items()
+        }
+        props["agency_blocked"] = {"type": "boolean"}
+        return {
+            "type": "object",
+            "properties": props,
+            "required": list(cls.RANGES) + ["agency_blocked"],
+        }

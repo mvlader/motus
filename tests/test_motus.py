@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import unittest.mock
 import os
 import random
 import shutil
@@ -14,6 +15,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from motus import appraisal as appraisal_mod  # noqa: E402
 from motus import config, replay  # noqa: E402
 from motus.clock import VirtualClock  # noqa: E402
 from motus.core import Homeostat  # noqa: E402
@@ -393,6 +395,71 @@ class TestBehaviour(unittest.TestCase):
 
 
 class TestAppraisal(unittest.TestCase):
+    def test_json_schema_matches_ranges(self):
+        """Схема для ollama строится из тех же RANGES, что и валидатор Appraisal.parse
+        — одна точка правды, не две копии диапазонов, которые могут разойтись."""
+        schema = Appraisal.json_schema()
+        for name, (lo, hi) in Appraisal.RANGES.items():
+            self.assertEqual(schema["properties"][name]["enum"], list(range(lo, hi + 1)))
+        self.assertEqual(schema["properties"]["agency_blocked"], {"type": "boolean"})
+        self.assertEqual(set(schema["required"]),
+                         set(Appraisal.RANGES) | {"agency_blocked"})
+
+    def test_ollama_sensor_parses_schema_conformant_response(self):
+        """Мок HTTP-ответа ollama: /api/generate возвращает {"response": "<json>"}.
+        Реального ollama в тестовом окружении нет и не должно быть — сенсор
+        обязан быть тестируем без сети."""
+        payload = {"valence": 1, "threat": 0, "novelty": 2, "social_warmth": 1,
+                  "loss": 0, "agency_blocked": False}
+
+        class FakeResp:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self):
+                return json.dumps({"response": json.dumps(payload)}).encode("utf-8")
+
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResp()
+
+        cfg = {"base_url": "http://host.docker.internal:11435",
+              "model": "qwen3:0.6b-q4_K_M", "timeout_s": 2.5,
+              "num_predict": 80, "temperature": 0.0}
+        sensor = appraisal_mod.ollama_sensor(cfg)
+
+        with unittest.mock.patch("urllib.request.urlopen", fake_urlopen):
+            result = sensor("тестовое сообщение")
+
+        self.assertEqual(result, payload)
+        self.assertEqual(captured["url"], "http://host.docker.internal:11435/api/generate")
+        self.assertEqual(captured["body"]["model"], "qwen3:0.6b-q4_K_M")
+        self.assertIn("format", captured["body"])
+        self.assertEqual(captured["body"]["format"]["properties"]["valence"]["enum"],
+                         [-2, -1, 0, 1, 2])
+        self.assertEqual(captured["timeout"], 2.5)
+
+    def test_ollama_sensor_failure_becomes_null_appraisal_via_appraiser(self):
+        """Отказ сенсора (таймаут, не-200, битый JSON) не должен двигать
+        состояние — Appraiser обязан поймать исключение и вернуть нули, а не
+        уронить движок."""
+        def broken_urlopen(req, timeout):
+            raise TimeoutError("no route to host")
+
+        cfg = {"base_url": "http://127.0.0.1:1", "model": "x", "timeout_s": 0.1}
+        sensor = appraisal_mod.ollama_sensor(cfg)
+        ap = appraisal_mod.Appraiser(sensor=sensor)
+
+        with unittest.mock.patch("urllib.request.urlopen", broken_urlopen):
+            result = ap.appraise_text("привет")
+
+        self.assertTrue(result.is_null())
+        self.assertEqual(ap.invalid_count, 1)
+
     def test_invalid_schema_falls_to_zero(self):
         for bad in (None, "нет", {"valence": 9}, {"valence": "x"}, {"threat": -1}, 42,
                     {"valence": 0, "agency_blocked": "yes"}):
@@ -431,6 +498,87 @@ class TestConfig(unittest.TestCase):
 
 
 class TestJournal(unittest.TestCase):
+    def test_raw_text_never_reaches_the_journal(self):
+        """Сырой текст пользователя оценивает сенсор и СРАЗУ выбрасывается — в
+        журнал уходит только производный appraisal (6 маленьких чисел), не
+        содержание сообщения. Тот же принцип, что и у карточки."""
+        secret = "не разглашай пароль от почты никому, это секретный текст"
+
+        def stub_sensor(text):
+            self.assertEqual(text, secret)
+            return {"valence": -1, "threat": 0, "novelty": 1, "social_warmth": 0,
+                   "loss": 0, "agency_blocked": False}
+
+        cfg = cfg_full()
+        tmp = tempfile.mkdtemp(prefix="motus-text-")
+        try:
+            jdir = os.path.join(tmp, "journal")
+            eng = Engine(cfg, VirtualClock(T0), Journal(jdir), sensor=stub_sensor)
+            eng.submit_event(Event("user_message", T0, {"text": secret}))
+            recs = list(Journal(jdir).read_all())
+            dumped = json.dumps(recs, ensure_ascii=False)
+            self.assertNotIn(secret, dumped)
+            self.assertNotIn("не разглашай", dumped)
+            ev = next(r for r in recs if r["kind"] == "event")
+            self.assertNotIn("text", ev["payload"]["payload"])
+            self.assertEqual(ev["payload"]["payload"]["appraisal"]["valence"], -1)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_text_dropped_even_when_appraisal_already_given(self):
+        """Правило безусловное: если вызывающий по ошибке шлёт и text, и готовый
+        appraisal одновременно, text всё равно не должен доехать до журнала."""
+        secret = "секретный текст, который не должен попасть в журнал"
+        cfg = cfg_full()
+        tmp = tempfile.mkdtemp(prefix="motus-text2-")
+        try:
+            jdir = os.path.join(tmp, "journal")
+            eng = Engine(cfg, VirtualClock(T0), Journal(jdir))  # без sensor вовсе
+            eng.submit_event(Event("user_message", T0, {
+                "text": secret,
+                "appraisal": {"valence": 2, "threat": 0, "novelty": 0,
+                             "social_warmth": 0, "loss": 0, "agency_blocked": False},
+            }))
+            recs = list(Journal(jdir).read_all())
+            self.assertNotIn(secret, json.dumps(recs, ensure_ascii=False))
+            ev = next(r for r in recs if r["kind"] == "event")
+            self.assertNotIn("text", ev["payload"]["payload"])
+            # appraisal, присланный вызывающим, использован как есть, не затёрт
+            # пустым сенсором (sensor=None => appraise_text вернул бы нули).
+            self.assertEqual(ev["payload"]["payload"]["appraisal"]["valence"], 2)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_no_false_appraisal_invalid_when_sensor_disabled(self):
+        """L-1 выключен по умолчанию — это штатно, не сбой. Раньше здесь на
+        каждое сообщение летела ложная запись appraisal_invalid."""
+        cfg = cfg_full()
+        tmp = tempfile.mkdtemp(prefix="motus-noinvalid-")
+        try:
+            jdir = os.path.join(tmp, "journal")
+            eng = Engine(cfg, VirtualClock(T0), Journal(jdir))  # sensor=None
+            eng.submit_event(Event("user_message", T0, {"text": "привет, как дела?"}))
+            kinds = [r["kind"] for r in Journal(jdir).read_all()]
+            self.assertNotIn("appraisal_invalid", kinds)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_appraisal_invalid_logged_when_sensor_actually_fails(self):
+        """А если сенсор настроен и реально отказал — запись должна появиться."""
+        def broken(text):
+            raise TimeoutError("stub")
+
+        cfg = cfg_full()
+        tmp = tempfile.mkdtemp(prefix="motus-invalid-")
+        try:
+            jdir = os.path.join(tmp, "journal")
+            eng = Engine(cfg, VirtualClock(T0), Journal(jdir), sensor=broken)
+            eng.submit_event(Event("user_message", T0, {"text": "привет, как дела?"}))
+            kinds = [r["kind"] for r in Journal(jdir).read_all()]
+            self.assertIn("appraisal_invalid", kinds)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_log_contains_required_fields(self):
         """Состав журнала по требованию: время, событие, вектор, гейт, карточка,
         вызов LLM. Если что-то из этого перестанет писаться — тест упадёт."""
