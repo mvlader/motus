@@ -1,0 +1,14 @@
+{
+  "id": "motus",
+  "name": "MOTUS",
+  "description": "Карточка мотивационного слоя в промпт + маска инструментов + события состояния.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "url": { "type": "string" },
+      "timeoutMs": { "type": "integer" },
+      "applyGate": { "type": "boolean" }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "openclaw-motus",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "description": "Мост openclaw → MOTUS: карточка в промпт, маска инструментов, события.",
+  "openclaw": {
+    "extensions": ["./index.js"]
+  }
+}
