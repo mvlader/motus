@@ -867,6 +867,48 @@ class TestReplay(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestListenerSplit(unittest.TestCase):
+    """Публичный слушатель отдаёт openclaw только PUBLIC_PATHS и карточку без
+    единого числа; всё остальное — только на админ-слушателе."""
+
+    def _handle(self, path, public, method="GET", body=None):
+        from motus.daemon import Handler, Service, PUBLIC_PATHS  # noqa
+        tmp = tempfile.mkdtemp(prefix="motus-lsplit-")
+        try:
+            Handler.service = Service(cfg_full(), tmp)
+            h = Handler.__new__(Handler)
+            h.server = type("S", (), {"public": public})()
+            h.path = path
+            sent = {}
+            h._send = lambda code, obj: sent.update(code=code, obj=obj)
+            h._body = lambda: (body or {})
+            (h.do_GET if method == "GET" else h.do_POST)()
+            return sent
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_public_blocks_raw_journal_tick_sleep(self):
+        for path, m in [("/state/raw", "GET"), ("/journal/tail", "GET"),
+                        ("/tick", "POST"), ("/sleep", "POST")]:
+            self.assertEqual(self._handle(path, public=True, method=m)["code"], 404, path)
+
+    def test_public_allows_card_and_event(self):
+        self.assertEqual(self._handle("/state/card", public=True)["code"], 200)
+        self.assertEqual(self._handle("/event", public=True, method="POST",
+                                      body={"kind": "user_message", "payload": {}})["code"], 200)
+
+    def test_public_card_carries_no_numbers(self):
+        gate = self._handle("/state/card", public=True)["obj"]["gate"]
+        self.assertNotIn("activation", gate)
+        self.assertNotIn("somatic_flags", gate)
+        self.assertIn("may_initiate", gate)         # маску отдаём
+        self.assertIn("allowed_tools", gate)
+
+    def test_admin_serves_everything(self):
+        self.assertEqual(self._handle("/state/raw", public=False)["code"], 200)
+        self.assertIn("activation", self._handle("/state/card", public=False)["obj"]["gate"])
+
+
 class TestNonFiniteHardening(unittest.TestCase):
     def test_state_from_dict_rejects_nan_snapshot(self):
         cfg = cfg_full()

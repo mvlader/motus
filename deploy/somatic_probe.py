@@ -10,16 +10,18 @@
 Что шлём и почему:
   * temp_c        — /sys/class/thermal/thermal_zone0 (cpu-thermal). Единственный
                     по-настоящему соматический сигнал на этой машине: Pi 5 под
-                    нагрузкой доходит до мягкого температурного лимита и троттлит.
-  * throttled     — scaling_cur_freq заметно ниже cpuinfo_max_freq (vcgencmd в
-                    контейнере нет, вывод по частоте — что есть).
+                    нагрузкой доходит до мягкого температурного лимита. Ядро само
+                    выводит из temp_c уровень thermal (somatic_update: линейно
+                    55→85 °C), отдельный флаг throttled не нужен.
   * disk_free_frac — statvfs('/'). На SSD 954 ГБ это почти всегда ~0.3, но если
                     контейнер однажды прижмёт к стенке — сигнал честный.
   * services_ok   — отвечает ли openclaw на своём порту. Если бот лёг — это
                     integrity-drop, ядро поднимет FEAR+CARE.
 
-Энергию не шлём: Pi от сети, поля «заряд» тут нет — пусть остаётся конфижный
-дефолт, а не выдуманное число.
+throttled НЕ шлём: в контейнере нет vcgencmd, а `scaling_cur_freq < max` на Pi 5
+верно и просто на холостом ходу (governor снижает частоту), то есть даёт ложную
+тревогу о троттлинге. Энергию тоже не шлём: Pi от сети, «заряда» нет — пусть
+остаётся конфижный дефолт.
 """
 
 from __future__ import annotations
@@ -34,8 +36,6 @@ import urllib.request
 from pathlib import Path
 
 THERMAL = "/sys/class/thermal/thermal_zone0/temp"
-FREQ_CUR = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"
-FREQ_MAX = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq"
 #: Где помнить прошлый опрос (для детекции фронта integrity_drop). Между запусками
 #: oneshot-сервиса переживает только каталог из StateDirectory=, отсюда env.
 STATE_FILE = Path(os.environ.get("MOTUS_PROBE_STATE", "/tmp/motus-somatic-probe.json"))
@@ -55,10 +55,6 @@ def collect(openclaw_port: int) -> dict:
     milli = _read_int(THERMAL)
     if milli is not None:
         payload["temp_c"] = round(milli / 1000.0, 1)
-
-    cur, mx = _read_int(FREQ_CUR), _read_int(FREQ_MAX)
-    if cur and mx:
-        payload["throttled"] = cur < mx * 0.9
 
     try:
         st = os.statvfs("/")
