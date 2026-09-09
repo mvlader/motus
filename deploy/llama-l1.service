@@ -5,7 +5,7 @@
 # Бинарь: prebuilt arm64 из релизов ggml-org/llama.cpp, распакован в /opt/llama.cpp
 #   (ggml делает runtime-диспетч CPU-вариантов → на Cortex-A76 берёт ядра с dotprod).
 # Модель: GGUF на бинд-маунте /var/lib/llama-models (host /mnt/torrents/llama-models),
-#   поэтому не попадает в ночные снапшоты grach и переживает пересборку контейнера.
+#   поэтому не попадает в снапшоты контейнера motus и переживает пересборку.
 # Выбор модели/кванта и цифры бенчмарка — docs/04-model-l1.md.
 
 [Unit]

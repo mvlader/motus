@@ -67,6 +67,8 @@ incus exec grach -- chmod -R a+rX /opt/motus-probe
 incus file push deploy/motus-somatic.service grach/etc/systemd/system/
 incus file push deploy/motus-somatic.timer   grach/etc/systemd/system/
 incus exec grach -- systemctl enable --now motus-somatic.timer
+
+# 7. плагин openclaw — см. deploy/openclaw-plugin/README.md
 ```
 
 ## Обновить код

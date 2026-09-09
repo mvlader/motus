@@ -130,22 +130,22 @@ L-1 намеренно локален: дёргается на каждое со
 
 ## Рантайм
 
+Всё это ставится **в контейнер `motus`**, рядом с motusd (не в grach).
+
 - **Бинарь** — prebuilt arm64 из релизов `ggml-org/llama.cpp`
-  (`llama-<build>-bin-ubuntu-arm64.tar.gz`), в `/opt/llama.cpp`. ggml делает
-  runtime-диспетч CPU-вариантов, на Cortex-A76 берёт ядра с `dotprod` (флаг
+  (`llama-<build>-bin-ubuntu-arm64.tar.gz`), распаковать в `/opt/llama.cpp`. ggml
+  делает runtime-диспетч CPU-вариантов, на Cortex-A76 берёт ядра с `dotprod` (флаг
   `asimddp`; `i8mm`/`sve` у A76 нет). Собирать из исходников ради `-mcpu=native` —
-  выигрыш в пределах шума, а в контейнер пришлось бы тащить toolchain.
-- **API** — `/completion` с `json_schema` (grammar-constrained), `cache_prompt: true`
-  (few-shot промпт ~1 КБ — постоянный префикс, KV кэшируется).
+  выигрыш в пределах шума.
+- **API** — `/completion` с `json_schema` (grammar-constrained), `cache_prompt: true`.
 - **Модели** — GGUF на бинд-маунте `/var/lib/llama-models` (host
-  `/mnt/torrents/llama-models`, Incus disk-device `shift=true`) — вне ночных
-  снапшотов `grach`, переживают пересборку.
-- **Юнит** — `deploy/llama-l1.service` (внутри `grach`, `User=openclaw`, `-t 3`,
-  `Nice=5`). Один `llama-server` = одна модель; смена модели — правка `-m` в юните
-  + `appraisal.model` в конфиге (информационное поле) + рестарт.
-- **Прогрев** — первый инференс грузит ~1.1 ГБ весов (15–25 с, больше любого
-  `timeout_s`), поэтому `motusd` при `mode: model` делает холостой вызов в фоне на
-  старте (`daemon.py:_warm_up_sensor`).
+  `/mnt/torrents/llama-models`, Incus disk-device `shift=true`) — вне снапшотов
+  контейнера, переживают пересборку.
+- **Юнит** — `deploy/llama-l1.service` (`User=motus`, `-t 3`, `Nice=5`). Один
+  `llama-server` = одна модель; смена — правка `-m` в юните + `appraisal.model` в
+  конфиге (информационное поле) + рестарт.
+- **Прогрев** — первый инференс грузит ~1.1 ГБ весов (15–25 с), поэтому `motusd`
+  при `mode: model` делает холостой вызов в фоне на старте (`daemon.py:_warm_up_sensor`).
 
 ## Бенчмарк моделей
 
@@ -169,26 +169,23 @@ Qwen3-0.6B ставила −2 на «спасибо» и «доброе утр�
 `gemma-4-E2B-it-assistant`** — это 78M-черновик для спекулятивного декодирования,
 не работает без полной `gemma-4-E2B` (2.3B активных, мультимодальна).
 
-## Латентность и неблокирующий хук
+## Латентность
 
-`POST /event` с текстом блокируется на всё время инференса (сенсор в `submit_event`
-синхронный). При `mode: model` **хук openclaw обязан звать его неблокирующе**
-(`curl ... &` или очередь) — событие уходит уже *после* ответа пользователю,
-openclaw ждать его не должен. См. `deploy/openclaw-hook.md`. Если станет мешать —
-следующий шаг сделать обработку текстовых событий в `motusd` асинхронной (принять,
-202, посчитать в воркере), но это трогает порядок событий и детерминизм реплея.
-В режиме `lexical` вопрос не стоит — оценка занимает ~1 мс.
+При `mode: model` `POST /event` с текстом блокируется на всё время инференса
+(~10 с, сенсор в `submit_event` синхронный). Плагин openclaw
+(`before_prompt_build`) при этом ждёт ответа перед тем, как строить промпт — на
+`mode: model` это чувствуется. Варианты: слать событие отдельным неблокирующим
+путём, либо сделать обработку текстовых событий в `motusd` асинхронной (принять,
+202, посчитать в воркере — трогает порядок событий и детерминизм реплея).
+В режиме `lexical` (по умолчанию) вопрос не стоит — оценка ~1 мс.
 
-## Что уже сделано на машине (2026-09-09)
+## Состояние (2026-09-09)
 
-- `/opt/llama.cpp` — prebuilt `llama-b10883` arm64, `llama-server` работает.
-- Incus disk-device `llama-models` на `grach`, на нём 4 GGUF (Qwen3-1.7B-Q4_K_M,
-  Qwen3-0.6B-Q8_0/-Q4_K_M, gemma-3-270m-it-Q8_0) + сырые результаты бенча.
-- `deploy/llama-l1.service` установлен в `/etc/systemd/system/`, **`disable`**,
-  сервер не запущен.
-- `make_sensor` → живой `llama-server` проверен вручную: тёплые вызовы ~9 с,
-  ответы осмысленные.
-- `motusd` в `grach` не деплоился; `appraisal.mode` в конфиге — `lexical`.
+`mode: lexical`, работает словарь. Модельный путь (`llama.cpp` + `deploy/llama-l1.service`)
+**не развёрнут**: `/opt/llama.cpp` и юнит нигде не установлены. GGUF-кандидаты
+(Qwen3-1.7B-Q4_K_M, Qwen3-0.6B-Q8_0/-Q4_K_M, gemma-3-270m-it-Q8_0) и сырые
+результаты бенча лежат на хосте в `/mnt/torrents/llama-models/` — переиспользуются,
+если модельный режим когда-нибудь понадобится.
 
 ## Включение режима `model`
 
@@ -205,17 +202,18 @@ openclaw ждать его не должен. См. `deploy/openclaw-hook.md`. �
 ```
 
 ```bash
-# 1. модель уже на бинд-маунте (/var/lib/llama-models/Qwen3-1.7B-Q4_K_M.gguf);
-#    если заново — curl -sL -O из https://huggingface.co/unsloth/Qwen3-1.7B-GGUF
-# 2. сервис (юнит уже установлен)
-sudo systemctl enable --now llama-l1
+# всё — внутри контейнера motus
+# 1. llama.cpp
+cd /opt && curl -sL -o l.tgz \
+  https://github.com/ggml-org/llama.cpp/releases/download/<build>/llama-<build>-bin-ubuntu-arm64.tar.gz
+mkdir llama.cpp && tar xzf l.tgz -C llama.cpp --strip-components=1
+# 2. disk-device для моделей + сама модель
+#    (на grach уже был такой device; для motus добавить свой: host /mnt/torrents/llama-models)
+incus config device add motus llama-models disk source=/mnt/torrents/llama-models path=/var/lib/llama-models shift=true
+# 3. юнит
+cp /opt/motus/deploy/llama-l1.service /etc/systemd/system/ && systemctl enable --now llama-l1
 curl -s http://127.0.0.1:8080/health          # {"status":"ok"}, первый старт ~20 с
-# 3. проверка сенсора без демона
-python3 -c "
-from motus.appraisal import make_sensor
-s = make_sensor({'api':'llamacpp','base_url':'http://127.0.0.1:8080'})
-print(s('наконец-то заработало, спасибо большое!'))"
-# 4. mode: model в конфиге, рестарт motusd; убедиться, что хук openclaw зовёт /event в фоне
+# 4. mode: model в конфиге motusd, рестарт motusd
 ```
 
 ## Нужен ли этот `llama-server` openclaw'у как провайдер
