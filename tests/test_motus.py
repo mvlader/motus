@@ -989,7 +989,7 @@ class TestCuration(unittest.TestCase):
             svc = Service(cfg, tmp)
             self.assertIsNotNone(svc.curator_sensor)
 
-            proposal = [{"op": "rewrite", "id": "housekeeping_check",
+            proposal = [{"op": "rewrite", "id": "check_on_the_space",
                         "prompt": "Проверь диск и бэкапы одной строкой отчёта.",
                         "rationale": "Короче — экономит бюджет ответа."}]
             with unittest.mock.patch.object(svc, "curator_sensor",
@@ -997,14 +997,14 @@ class TestCuration(unittest.TestCase):
                 svc.run_curation(svc.engine.rep.efficacy_report())
 
             updated = next(t for t in svc.engine.rep.data["templates"]
-                          if t["id"] == "housekeeping_check")
+                          if t["id"] == "check_on_the_space")
             self.assertEqual(updated["prompt"], "Проверь диск и бэкапы одной строкой отчёта.")
 
             # персистентность: новый Service поднимает ИЗМЕНЁННЫЙ репертуар, не бутстрап
             self.assertTrue(os.path.exists(svc.repertoire_path))
             svc2 = Service(cfg, tmp)
             reloaded = next(t for t in svc2.engine.rep.data["templates"]
-                           if t["id"] == "housekeeping_check")
+                           if t["id"] == "check_on_the_space")
             self.assertEqual(reloaded["prompt"], "Проверь диск и бэкапы одной строкой отчёта.")
 
             kinds = [r["kind"] for r in svc.journal.read_all()]
@@ -1303,10 +1303,10 @@ class TestReplay(unittest.TestCase):
         cfg = cfg_full()
         a = Engine(cfg, VirtualClock(T0), NullJournal())
         b = Engine(cfg, VirtualClock(T0), NullJournal())
-        a.rep.record("explore_unread_file", -0.4, 100.0, True)
-        ea = next(t for t in a.rep.data["templates"] if t["id"] == "explore_unread_file")
-        eb = next(t for t in b.rep.data["templates"] if t["id"] == "explore_unread_file")
-        ec = next(t for t in cfg["_repertoire"]["templates"] if t["id"] == "explore_unread_file")
+        a.rep.record("follow_curiosity", -0.4, 100.0, True)
+        ea = next(t for t in a.rep.data["templates"] if t["id"] == "follow_curiosity")
+        eb = next(t for t in b.rep.data["templates"] if t["id"] == "follow_curiosity")
+        ec = next(t for t in cfg["_repertoire"]["templates"] if t["id"] == "follow_curiosity")
         self.assertEqual(ea["efficacy"]["n"], 1)
         self.assertEqual(eb["efficacy"]["n"], 0)
         self.assertEqual(ec["efficacy"]["n"], 0)
@@ -1557,11 +1557,18 @@ class TestTier1Executor(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_prompt_has_no_outbound_preamble(self):
-        p = tier1_executor.PREAMBLE.format(tools="read, memory", drop="/d",
-                                           max_tokens=200, prompt="сделай X")
-        self.assertIn("НЕ отправляй никаких сообщений", p)
+        p = tier1_executor.PREAMBLE_WITH_DROP.format(tools="read, memory", drop="/d",
+                                                      max_tokens=200, prompt="сделай X")
+        self.assertIn("НЕ отправляй ничего наружу", p)
         self.assertIn("сделай X", p)
         self.assertIn("/d", p)
+
+    def test_reflection_preamble_has_no_outbound_and_no_drop_placeholder(self):
+        p = tier1_executor.PREAMBLE_REFLECTION.format(tools="read", max_tokens=200,
+                                                       prompt="побудь так")
+        self.assertIn("НЕ отправляй ничего наружу", p)
+        self.assertIn("не обязана", p)
+        self.assertIn("побудь так", p)
 
     def test_verify_requires_fresh_nonempty_result(self):
         tmp = tempfile.mkdtemp(prefix="motus-t1-")
@@ -1586,6 +1593,17 @@ class TestTier1Executor(unittest.TestCase):
             self.assertEqual(why, "artifact_created")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_verify_reflection_needs_no_file_at_all(self):
+        now = time.time()
+        # ok=True и drop=None (акт ничего не написал) — всё равно verified
+        ok, why = tier1_executor.verify({"type": "reflection"}, None, now, ok=True)
+        self.assertTrue(ok)
+        self.assertEqual(why, "reflection")
+        # отказ хода всё равно проваливает верификацию — reflection не значит "всё сойдёт"
+        ok, why = tier1_executor.verify({"type": "reflection"}, None, now, ok=False)
+        self.assertFalse(ok)
+        self.assertEqual(why, "openclaw_error")
 
     def test_full_cycle_reports_verified_consummation(self):
         tmp = tempfile.mkdtemp(prefix="motus-t1-")
@@ -1641,6 +1659,39 @@ class TestTier1Executor(unittest.TestCase):
                         tier1_executor._run(self._args(tmp))
             cons = [b for u, b in posted if u.endswith("/consummation")][0]
             self.assertFalse(cons["verified"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_full_cycle_reflection_verified_without_any_file(self):
+        """wander/follow_curiosity (consummation=reflection): verified=True без
+        единого файла на диске, ни в drops/, ни где-либо ещё."""
+        tmp = tempfile.mkdtemp(prefix="motus-t1-")
+        try:
+            task = {"template_id": "wander", "drive": "PLAY", "prompt": "побудь так",
+                    "allowed_tools": ["read"], "consummation": {"type": "reflection"},
+                    "max_tokens": 300, "issued_t": 7.0}
+            posted = []
+            captured_prompt = {}
+
+            def fake_run(openclaw, oc_args, cwd, message_file, timeout_s, model):
+                captured_prompt["text"] = pathlib.Path(message_file).read_text(encoding="utf-8")
+                return True, {}, "{}"  # ничего не пишет на диск — и не обязан
+
+            with unittest.mock.patch.object(tier1_executor, "_get",
+                                            return_value={"task": task}):
+                with unittest.mock.patch.object(tier1_executor, "run_openclaw",
+                                                side_effect=fake_run):
+                    with unittest.mock.patch.object(
+                            tier1_executor, "_post",
+                            side_effect=lambda url, body, **k: posted.append((url, body)) or {}):
+                        rc = tier1_executor._run(self._args(tmp))
+
+            self.assertEqual(rc, 0)
+            cons = [b for u, b in posted if u.endswith("/consummation")][0]
+            self.assertTrue(cons["verified"])
+            self.assertFalse((pathlib.Path(tmp) / "drops").exists())
+            self.assertIn("побудь так", captured_prompt["text"])
+            self.assertIn("не обязана", captured_prompt["text"])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

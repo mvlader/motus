@@ -78,9 +78,13 @@ python3 tools/simulate.py --hours 72 --scenario silence
 - Датчик железа Pi 5: `deploy/somatic_probe.py` + systemd-таймер шлют температуру,
   свободный диск и живость openclaw в `somatic_update()`
 - Защита от NaN/±Inf/нулевых τ в конфиге и снапшоте
-- **Исполнитель задач (Tier 1)** — `deploy/tier1_executor.py` + таймер
-  `motus-tier1` в grach: `GET /task/next` → изолированный `openclaw agent exec`
-  (без каналов) → проверка результата кодом → `POST /consummation`
+- **Исполнитель консумматорных актов (Tier 1)** — не таск-раннер для
+  пользователя, то, чем система занимается сама с собой в тишине:
+  `deploy/tier1_executor.py` + таймер `motus-tier1` в grach: `GET /task/next` →
+  изолированный `openclaw agent exec` (без каналов) → проверка кодом →
+  `POST /consummation`. Репертуар (`config/repertoire.json`) переписан под это —
+  часть актов (`consummation.type: "reflection"`) не требует артефакта вовсе,
+  верифицируется только тем, что ход состоялся
 - **Доставка проактивных сообщений (Tier 2)** — `deploy/tier2_executor.py` +
   таймер `motus-tier2`: `GET /initiate/pending` (решено только после тишины
   дольше `INITIATE_MIN_SILENCE_S`) → `openclaw agent --deliver` → `/refund` при

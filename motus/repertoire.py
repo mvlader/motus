@@ -36,7 +36,12 @@ CURATABLE_DRIVES = tuple(d for d in DRIVES if d != "RAGE")
 
 #: Типы консумматорного акта, известные исполнителю (Tier 1). Модель не может
 #: выдумать новый тип — он должен быть понятен коду, который его проверяет.
-KNOWN_CONSUMMATION_TYPES = ("memory_entry", "artifact_queued", "artifact_created", "check_passed")
+#: "reflection" (2026-09-11) — единственный тип БЕЗ артефакта: верифицируется
+#: только тем, что ход состоялся (не оборвался ошибкой), файла не требует.
+#: Не всё, чем личность занимается сама с собой, обязано превращаться в отчёт —
+#: см. config/repertoire.json, "_note_2026_09_11".
+KNOWN_CONSUMMATION_TYPES = ("memory_entry", "artifact_queued", "artifact_created",
+                           "check_passed", "reflection")
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 _MAX_PROMPT_LEN = 400

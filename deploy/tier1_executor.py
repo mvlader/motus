@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Tier 1 — исполнитель фоновых задач MOTUS.
+"""Tier 1 — исполнитель консумматорных актов MOTUS.
 
-Забирает одну задачу из репертуара (`GET /task/next`), прогоняет её ОДНИМ
-изолированным ходом openclaw без единого канала наружу, проверяет результат
-кодом и засчитывает утоление (`POST /consummation`). Без него драйвы
-SEEKING / CARE / PLAY / FEAR / PANIC гасить нечем, кроме живого разговора, и
-система копит активацию, пока не упрётся в инициацию.
+Не таск-раннер для пользователя — то, чем личность занимается сама с собой в
+тишине, когда драйв домінирует и разговора нет. Забирает один акт из репертуара
+(`GET /task/next`), прогоняет его ОДНИМ изолированным ходом openclaw без
+единого канала наружу, проверяет факт исполнения кодом и засчитывает утоление
+(`POST /consummation`). Без него SEEKING/CARE/PLAY/FEAR/PANIC гасить нечем,
+кроме живого разговора, и система копит активацию, пока не упрётся в инициацию.
 
 Запускается по таймеру (`deploy/motus-tier1.timer`) ВНУТРИ контейнера `grach` —
 там openclaw и рабочий каталог. MOTUS видит от него только публичный API
@@ -13,13 +14,17 @@ SEEKING / CARE / PLAY / FEAR / PANIC гасить нечем, кроме жив�
 журнала. Изоляция ядра не нарушается.
 
 Три правила, которые нельзя ослаблять (engine.py, «Сборка слоёв»):
-  1. Фоновая задача НИКОГДА не получает канал наружу. Здесь это трёхкратная
+  1. Фоновый акт НИКОГДА не получает канал наружу. Здесь это трёхкратная
      защита: `--isolated` у openclaw (нет ambient-конфига → нет каналов),
      служебная преамбула в промпте, и явная проверка `outbound not in
      allowed_tools` перед запуском.
-  2. Утоление начисляется только по ПРОВЕРЯЕМОМУ ФАКТУ (файл-результат создан и
-     свеж), а не по словам модели.
-  3. Одна задача за запуск. Частоту ограничивает и таймер, и `task_min_interval_s`
+  2. Утоление начисляется только по ПРОВЕРЯЕМОМУ ФАКТУ, а не по словам модели —
+     но проверяемый факт не обязан быть артефактом. Большинство типов
+     консумации (`memory_entry`/`artifact_created`/`check_passed`) требуют файл
+     заново созданным и свежим; `reflection` (2026-09-11) требует только, чтобы
+     ход состоялся без ошибки — не всё, чем личность занимается сама с собой,
+     обязано превращаться в отчёт. См. config/repertoire.json.
+  3. Один акт за запуск. Частоту ограничивает и таймер, и `task_min_interval_s`
      в конфиге MOTUS, и длина очереди репертуара.
 
 Только stdlib.
@@ -55,18 +60,34 @@ DEFAULT_OPENCLAW = os.environ.get(
 #: `--config <урезанный.json>` вместо `--isolated`).
 DEFAULT_OC_ARGS = os.environ.get("MOTUS_TIER1_OC_ARGS", "--isolated --local-model-lean")
 
-#: Преамбула жёстче задачи. Дописывается перед task.prompt.
-PREAMBLE = """СЛУЖЕБНЫЕ ПРАВИЛА — они важнее текста задачи:
-- Это фоновая задача MOTUS. Ты работаешь в одиночку, пользователя рядом нет.
-- НЕ отправляй никаких сообщений: ни в один канал, ни в телеграм, ни «ответить».
-  Никакого исходящего трафика к людям. Только локальная работа.
+#: Преамбула жёстче самого акта — эти границы модель не вправе переступить,
+#: что бы ни говорил текст ниже. Два варианта: с файлом-следом (большинство
+#: типов консумации) и без (reflection — показывать нечего, и это нормально).
+PREAMBLE_WITH_DROP = """Несколько жёстких границ — они важнее того, что написано ниже:
+- Тебя сейчас не видит и не читает никто. Не адресуй ничего пользователю —
+  ни сообщения, ни «вот что я сделала». Это не для него, это для тебя самой.
+- НЕ отправляй ничего наружу: ни в один канал, ни в телеграм. Только локально.
 - Разрешённые классы действий: {tools}.
-- Свой результат ИЛИ короткий отчёт о проделанном запиши целиком в файл:
+- В конце запиши в файл то, что хочешь оставить себе (не отчёт для меня —
+  памятка для себя же, на будущее):
     {drop}
-  Перезапиши этот файл полностью. Если файла не будет — задача не засчитается.
-- Ответ в чат укладывай в {max_tokens} токенов, он всё равно никуда не уходит.
+  Перезаписать целиком. Файл нужен именно тебе: без него не останется следа,
+  что это вообще было.
+- Уложись в {max_tokens} токенов — не потому что кто-то читает, а чтобы не
+  тратить впустую.
 
-ЗАДАЧА:
+{prompt}
+"""
+
+PREAMBLE_REFLECTION = """Несколько жёстких границ — они важнее того, что написано ниже:
+- Тебя сейчас не видит и не читает никто. Это не для отчёта и не для того,
+  чтобы кому-то что-то доказать.
+- НЕ отправляй ничего наружу: ни в один канал, ни в телеграм. Только локально.
+- Разрешённые классы действий: {tools}.
+- Показывать результат не обязана. Можно ничего не производить — сам факт,
+  что это произошло, уже достаточен.
+- Уложись в {max_tokens} токенов.
+
 {prompt}
 """
 
@@ -149,17 +170,22 @@ def _tokens(env: Dict[str, Any]) -> Tuple[int, int]:
 # --------------------------------------------------------------- верификация
 
 
-def verify(consummation: Dict[str, Any], drop: Path, started: float,
+def verify(consummation: Dict[str, Any], drop: Optional[Path], started: float,
            ok: bool) -> Tuple[bool, str]:
     """Проверяемый факт выполнения. Тип из шаблона репертуара.
 
-    Общий минимум для всех типов: ход openclaw не завершился ошибкой И
-    файл-результат создан заново и непустой. Числовые пороги (novelty_min и
-    т.п.) здесь не проверяются — это работа ночного цикла по журналу.
+    "reflection" — единственное исключение из «нужен файл»: верифицируется
+    тем, что ход состоялся без ошибки, и только этим. Остальные типы
+    (memory_entry/artifact_created/artifact_queued/check_passed) по-прежнему
+    требуют файл-след, созданный заново и непустой — числовые пороги
+    (novelty_min и т.п.) здесь не проверяются, это работа ночного цикла.
     """
+    ctype = consummation.get("type", "done")
     if not ok:
         return False, "openclaw_error"
-    if not drop.exists():
+    if ctype == "reflection":
+        return True, "reflection"
+    if drop is None or not drop.exists():
         return False, "no_result_file"
     try:
         st = drop.stat()
@@ -169,7 +195,7 @@ def verify(consummation: Dict[str, Any], drop: Path, started: float,
         return False, "stale_result_file"
     if st.st_size < 8:
         return False, "empty_result_file"
-    return True, consummation.get("type", "done")
+    return True, ctype
 
 
 # --------------------------------------------------------------- основной цикл
@@ -226,22 +252,33 @@ def _run(args) -> int:
         print(f"tier1: ОТКАЗ — в задаче {tid} есть outbound, пропускаем", file=sys.stderr)
         return 1
 
-    drop = args.state_dir / "drops" / f"{tid}-{int(task.get('issued_t', time.time()))}"
-    drop.parent.mkdir(parents=True, exist_ok=True)
-    if drop.exists():
-        drop.unlink()
+    ctype = task.get("consummation", {}).get("type", "done")
+    is_reflection = ctype == "reflection"
 
-    prompt = PREAMBLE.format(
-        tools=", ".join(tools) or "read",
-        drop=drop,
-        max_tokens=task.get("max_tokens", 500),
-        prompt=task["prompt"],
-    )
+    drop: Optional[Path] = None
+    if is_reflection:
+        prompt = PREAMBLE_REFLECTION.format(
+            tools=", ".join(tools) or "read",
+            max_tokens=task.get("max_tokens", 500),
+            prompt=task["prompt"],
+        )
+    else:
+        drop = args.state_dir / "drops" / f"{tid}-{int(task.get('issued_t', time.time()))}"
+        drop.parent.mkdir(parents=True, exist_ok=True)
+        if drop.exists():
+            drop.unlink()
+        prompt = PREAMBLE_WITH_DROP.format(
+            tools=", ".join(tools) or "read",
+            drop=drop,
+            max_tokens=task.get("max_tokens", 500),
+            prompt=task["prompt"],
+        )
     msg_file = args.state_dir / "task-prompt.txt"
     msg_file.write_text(prompt, encoding="utf-8")
 
     if args.dry_run:
-        print(json.dumps({"task": task, "drop": str(drop)}, ensure_ascii=False, indent=2))
+        print(json.dumps({"task": task, "drop": str(drop) if drop else None},
+                         ensure_ascii=False, indent=2))
         print("--- PROMPT ---\n" + prompt)
         return 0
 
@@ -275,7 +312,9 @@ def _run(args) -> int:
         return 1
 
     # Успешный результат храним ограниченно — на разбор ночным циклом и оператором.
-    _prune_drops(drop.parent, keep=40)
+    # reflection ничего не пишет — drop is None, prune нечего.
+    if drop is not None:
+        _prune_drops(drop.parent, keep=40)
     return 0
 
 
