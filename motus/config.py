@@ -140,6 +140,18 @@ def validate(cfg: Dict[str, Any]) -> None:
             if not ap.get(key):
                 raise ConfigError(f"appraisal.mode=model, но не задано appraisal.{key}")
 
+    cu = cfg.get("curation", {})
+    if "enabled" in cu and not isinstance(cu["enabled"], bool):
+        raise ConfigError("curation.enabled: ожидается true|false")
+    if cu.get("enabled"):
+        api = cu.get("api", "ollama")
+        if api not in ("llamacpp", "ollama"):
+            raise ConfigError(f"curation.api: ожидается llamacpp|ollama, получено {api!r}")
+        required = ("base_url",) if api == "llamacpp" else ("base_url", "model")
+        for key in required:
+            if not cu.get(key):
+                raise ConfigError(f"curation.enabled=true, но не задано curation.{key}")
+
     for tpl in cfg.get("_repertoire", {}).get("templates", []):
         if tpl["drive"] not in DRIVES:
             raise ConfigError(f"шаблон {tpl['id']}: неизвестный драйв {tpl['drive']}")

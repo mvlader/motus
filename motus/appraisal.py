@@ -29,10 +29,9 @@ appraisal_invalid — отказ сенсора не должен двигать
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
+from . import modelcall
 from .events import Appraisal, Event, Impulse
 from .lexicon_l1 import lexical_appraise
 
@@ -154,67 +153,41 @@ def llamacpp_sensor(cfg: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:
     кэширует его KV между вызовами, платим только за сам текст сообщения.
 
     Бросает исключение при сбое сети/таймауте/не-200 — Appraiser сам ловит любое
-    исключение и падает в нули (docs/02-terms.md: «отказ сенсора не должен
-    двигать состояние»), поэтому здесь ничего не глушится молча.
+    исключение и падает в нули/словарь (docs/02-terms.md: «отказ сенсора не
+    должен двигать состояние»), поэтому здесь ничего не глушится молча.
+
+    HTTP-логика — в modelcall.llamacpp_complete(), общая с curator.py.
     """
-    base_url = cfg["base_url"].rstrip("/")
+    base_url = cfg["base_url"]
     timeout_s = float(cfg.get("timeout_s", 8.0))
     num_predict = int(cfg.get("num_predict", 96))
     temperature = float(cfg.get("temperature", 0.0))
 
     def sensor(text: str) -> Dict[str, Any]:
-        body = json.dumps({
-            "prompt": SENSOR_PROMPT + text,
-            "json_schema": Appraisal.json_schema(),
-            "n_predict": num_predict,
-            "temperature": temperature,
-            "cache_prompt": True,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            f"{base_url}/completion", data=body,
-            headers={"Content-Type": "application/json"}, method="POST",
+        return modelcall.llamacpp_complete(
+            base_url, SENSOR_PROMPT + text, Appraisal.json_schema(),
+            timeout_s=timeout_s, num_predict=num_predict, temperature=temperature,
         )
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            if resp.status != 200:
-                raise urllib.error.HTTPError(
-                    base_url, resp.status, "llama-server non-200", resp.headers, None
-                )
-            out = json.loads(resp.read().decode("utf-8"))
-        return json.loads(out["content"])
 
     return sensor
 
 
 def ollama_sensor(cfg: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:
-    """Легаси-адаптер под ollama `/api/generate` (`format` = JSON-схема, 0.3.0+).
-    Оставлен на случай, если L-1 будут гонять через ollama, а не llama.cpp;
-    рабочий рантайм проекта — llamacpp_sensor, см. docs/04-model-l1.md.
+    """Адаптер под ollama `/api/generate` (`format` = JSON-схема, 0.3.0+) —
+    рабочий рантайм для gemma-4 E4B на ПК по LAN, см. docs/04-model-l1.md.
+    HTTP-логика — в modelcall.ollama_generate(), общая с curator.py.
     """
-    base_url = cfg["base_url"].rstrip("/")
+    base_url = cfg["base_url"]
     model = cfg["model"]
     timeout_s = float(cfg.get("timeout_s", 8.0))
     num_predict = int(cfg.get("num_predict", 96))
     temperature = float(cfg.get("temperature", 0.0))
 
     def sensor(text: str) -> Dict[str, Any]:
-        body = json.dumps({
-            "model": model,
-            "prompt": SENSOR_PROMPT + text,
-            "format": Appraisal.json_schema(),
-            "stream": False,
-            "options": {"temperature": temperature, "num_predict": num_predict},
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            f"{base_url}/api/generate", data=body,
-            headers={"Content-Type": "application/json"}, method="POST",
+        return modelcall.ollama_generate(
+            base_url, model, SENSOR_PROMPT + text, Appraisal.json_schema(),
+            timeout_s=timeout_s, num_predict=num_predict, temperature=temperature,
         )
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            if resp.status != 200:
-                raise urllib.error.HTTPError(
-                    base_url, resp.status, "ollama non-200", resp.headers, None
-                )
-            out = json.loads(resp.read().decode("utf-8"))
-        return json.loads(out["response"])
 
     return sensor
 

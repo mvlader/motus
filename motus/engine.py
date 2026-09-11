@@ -306,13 +306,11 @@ class Engine:
         st.last_sleep_t = st.t
         self._sleep_deferred_logged = False
 
-        eff = [
-            {"id": t["id"], "drive": t["drive"], **t.get("efficacy", {}),
-             "rationale": t.get("rationale", "")}
-            for t in self.rep.data["templates"]
-        ]
+        eff = self.rep.efficacy_report()
         self.journal.write("sleep", st.t, {"deferred": False, "templates": len(eff)},
                            st.snapshot())
-        # Курирование репертуара моделью (шаг 2 ночного цикла) в v0.1 не реализовано:
-        # отчёт возвращается наружу, решение принимает вызывающий.
+        # Курирование репертуара моделью (шаг 2 ночного цикла) — не здесь:
+        # отчёт возвращается наружу (SleepReport.efficacy), решение и вызов
+        # модели — Service.run_curation() в daemon.py. L0/L1 (Homeostat,
+        # Engine) сетевого доступа не имеют и не должны — см. motus/curator.py.
         return SleepReport(True, "ok", eff)

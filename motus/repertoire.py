@@ -14,9 +14,11 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from .config import DRIVES
 from .core import Homeostat
 from .gates import Gate
 from .state import State
@@ -26,6 +28,24 @@ from .state import State
 PRECONDITIONS = ("no_aversive_active", "budget_ok", "energy_ok", "context_fresh")
 
 QUOTA_PER_NIGHT = 3  # сколько правок репертуара разрешено модели за один ночной цикл
+
+#: Драйвы, для которых модели разрешено предлагать шаблоны. RAGE исключён тем
+#: же правилом, что и в config.validate(): «у RAGE не может быть репертуара» —
+#: это ядро, не то, что курирование вправе тронуть.
+CURATABLE_DRIVES = tuple(d for d in DRIVES if d != "RAGE")
+
+#: Типы консумматорного акта, известные исполнителю (Tier 1). Модель не может
+#: выдумать новый тип — он должен быть понятен коду, который его проверяет.
+KNOWN_CONSUMMATION_TYPES = ("memory_entry", "artifact_queued", "artifact_created", "check_passed")
+
+_ID_RE = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
+_MAX_PROMPT_LEN = 400
+_MAX_RATIONALE_LEN = 300
+#: Потолок числа шаблонов в репертуаре. Без него множество ночей подряд с
+#: op=add и без соразмерного archive устроили бы неограниченный рост файла и
+#: неограниченный рост пространства выбора в select() — тот же аттракторный
+#: риск, что и у бесконечной очереди задач (task_ttl_s/max_queue).
+MAX_TEMPLATES = 40
 
 
 @dataclass
@@ -186,3 +206,107 @@ class Repertoire:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(self.data, fh, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
+
+    # ------------------------------------------------- курирование (ночь)
+
+    def efficacy_report(self) -> List[Dict[str, Any]]:
+        """Снимок для модели на ночном курировании: то же самое, что уже
+        возвращает engine.maybe_sleep() как SleepReport.efficacy — вынесено
+        сюда как метод репертуара, а не только побочный продукт сна."""
+        return [
+            {"id": t["id"], "drive": t["drive"], **t.get("efficacy", {}),
+             "rationale": t.get("rationale", ""), "prompt": t["prompt"]}
+            for t in self.data["templates"]
+        ]
+
+    def apply_edits(self, edits: Any) -> Dict[str, Any]:
+        """Применить ПРЕДЛОЖЕНИЯ модели (curator.propose_edits) с полной
+        code-side проверкой — вызывающая сторона не обязана доверять модели
+        ни в чём. Правки, не прошедшие проверку, отбрасываются по отдельности
+        (fail-closed на каждую, не на всю пачку), с причиной — для журнала.
+
+        Три границы, которые эта функция обязана держать (docs/01 §6):
+          1. Квота — не больше QUOTA_PER_NIGHT штук за вызов, остальное игнор.
+          2. Ядро существующего шаблона (drive/consummation/preconditions)
+             правка "rewrite" тронуть не может физически — в её схеме этих
+             полей просто нет, трогаются только prompt/rationale.
+          3. Пространство значений для НОВОГО шаблона (op=add) сужено заранее:
+             drive только из CURATABLE_DRIVES, consummation.type только из
+             KNOWN_CONSUMMATION_TYPES, preconditions только из PRECONDITIONS.
+        """
+        applied: List[str] = []
+        rejected: List[Dict[str, str]] = []
+        if not isinstance(edits, list):
+            return {"applied": applied, "rejected": [{"id": "?", "reason": "not_a_list"}]}
+        for edit in edits[:QUOTA_PER_NIGHT]:
+            ok, eid, reason = self._apply_one(edit)
+            if ok:
+                applied.append(eid)
+            else:
+                rejected.append({"id": eid, "reason": reason})
+        return {"applied": applied, "rejected": rejected}
+
+    def _apply_one(self, edit: Any) -> Tuple[bool, str, str]:
+        """Вернуть (применено?, id_для_журнала, причина_если_нет)."""
+        if not isinstance(edit, dict):
+            return False, "?", "not_a_dict"
+        eid = edit.get("id")
+        if not isinstance(eid, str) or not _ID_RE.match(eid):
+            return False, str(eid), "bad_id"
+        op = edit.get("op")
+
+        if op == "rewrite":
+            tpl = next((t for t in self.data["templates"] if t["id"] == eid), None)
+            if tpl is None:
+                return False, eid, "unknown_id"
+            prompt = edit.get("prompt")
+            rationale = edit.get("rationale")
+            changed = False
+            if isinstance(prompt, str) and prompt.strip() and len(prompt) <= _MAX_PROMPT_LEN:
+                tpl["prompt"] = prompt.strip()
+                changed = True
+            if (isinstance(rationale, str) and rationale.strip()
+                    and len(rationale) <= _MAX_RATIONALE_LEN):
+                tpl["rationale"] = rationale.strip()
+                changed = True
+            return (changed, eid, "rewritten" if changed else "empty_rewrite")
+
+        if op == "add":
+            if any(t["id"] == eid for t in self.data["templates"]):
+                return False, eid, "id_exists"
+            if len(self.data["templates"]) >= MAX_TEMPLATES:
+                return False, eid, "repertoire_full"
+            drive = edit.get("drive")
+            if drive not in CURATABLE_DRIVES:
+                return False, eid, "bad_drive"
+            ctype = edit.get("consummation_type")
+            if ctype not in KNOWN_CONSUMMATION_TYPES:
+                return False, eid, "bad_consummation_type"
+            preconds = edit.get("preconditions", [])
+            if not isinstance(preconds, list) or any(p not in PRECONDITIONS for p in preconds):
+                return False, eid, "bad_preconditions"
+            prompt = edit.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > _MAX_PROMPT_LEN:
+                return False, eid, "bad_prompt"
+            rationale = edit.get("rationale", "")
+            if not isinstance(rationale, str):
+                rationale = ""
+            self.data["templates"].append({
+                "id": eid, "drive": drive, "cost_tier": "local", "max_tokens": 600,
+                "preconditions": list(preconds), "consummation": {"type": ctype},
+                "prompt": prompt.strip(), "rationale": rationale.strip()[:_MAX_RATIONALE_LEN],
+                "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0},
+            })
+            return True, eid, "added"
+
+        if op == "archive":
+            idx = next((i for i, t in enumerate(self.data["templates"]) if t["id"] == eid), None)
+            if idx is None:
+                return False, eid, "unknown_id"
+            tpl = self.data["templates"].pop(idx)
+            self.data.setdefault("archived", []).append(tpl)
+            # Задачи этого шаблона, уже стоящие в очереди, пусть доживут —
+            # архивация не отменяет то, что уже выдано и, может, выполняется.
+            return True, eid, "archived"
+
+        return False, eid, "unknown_op"

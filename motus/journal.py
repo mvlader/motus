@@ -14,7 +14,8 @@ from typing import Any, Dict, Iterator, List, Optional
 
 KINDS = (
     "boot", "tick", "event", "impulse", "gate_change", "card",
-    "llm_call", "task", "consummation", "sleep", "appraisal_invalid", "error",
+    "llm_call", "task", "consummation", "sleep", "curation",
+    "appraisal_invalid", "error",
 )
 
 

@@ -13,16 +13,17 @@ import random
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from motus import appraisal as appraisal_mod  # noqa: E402
-from motus import config, replay  # noqa: E402
+from motus import config, curator, replay  # noqa: E402
 from motus.clock import VirtualClock  # noqa: E402
 from motus.core import Homeostat  # noqa: E402
-from motus.engine import Engine  # noqa: E402
+from motus.engine import Engine, SleepReport  # noqa: E402
 from motus.events import Appraisal, Event, Impulse  # noqa: E402
 from motus.gates import REGIME_POLICY, Gatekeeper  # noqa: E402
 from motus.journal import Journal, NullJournal  # noqa: E402
@@ -795,6 +796,271 @@ class TestAppraisal(unittest.TestCase):
         self.assertGreater(eng.state.drives["CARE"], cfg["drives"]["CARE"]["setpoint"])
 
 
+class TestCuration(unittest.TestCase):
+    """Ночной цикл, шаг 2: motus/repertoire.py Repertoire.apply_edits +
+    motus/curator.py. Модель предлагает, код проверяет и применяет — тесты
+    бьют именно по границе доверия: что код обязан отклонить, а что —
+    легитимная правка."""
+
+    def _rep(self):
+        from motus.repertoire import Repertoire
+        cfg = cfg_full()
+        h, _, _ = mk(cfg)
+        return Repertoire(cfg, h)
+
+    def test_rewrite_updates_prompt_and_rationale_only(self):
+        rep = self._rep()
+        before = next(t for t in rep.data["templates"] if t["id"] == "prepare_reentry")
+        drive_before, cons_before = before["drive"], dict(before["consummation"])
+        result = rep.apply_edits([{"op": "rewrite", "id": "prepare_reentry",
+                                   "prompt": "Собери короткую записку.",
+                                   "rationale": "Короче — лучше читается ночью."}])
+        self.assertEqual(result["applied"], ["prepare_reentry"])
+        after = next(t for t in rep.data["templates"] if t["id"] == "prepare_reentry")
+        self.assertEqual(after["prompt"], "Собери короткую записку.")
+        self.assertEqual(after["rationale"], "Короче — лучше читается ночью.")
+        # ядро — то, что правка физически не могла тронуть (в схеме этих полей нет)
+        self.assertEqual(after["drive"], drive_before)
+        self.assertEqual(after["consummation"], cons_before)
+
+    def test_rewrite_unknown_id_rejected(self):
+        rep = self._rep()
+        result = rep.apply_edits([{"op": "rewrite", "id": "not_a_real_template",
+                                   "prompt": "x"}])
+        self.assertEqual(result["applied"], [])
+        self.assertEqual(result["rejected"][0]["reason"], "unknown_id")
+
+    def test_add_valid_template(self):
+        rep = self._rep()
+        n_before = len(rep.data["templates"])
+        result = rep.apply_edits([{
+            "op": "add", "id": "tidy_journal", "drive": "CARE",
+            "consummation_type": "check_passed", "preconditions": ["budget_ok"],
+            "prompt": "Проверь журнал на ошибки за сутки.",
+            "rationale": "Дешёвая проверка, ловит проблемы рано.",
+        }])
+        self.assertEqual(result["applied"], ["tidy_journal"])
+        self.assertEqual(len(rep.data["templates"]), n_before + 1)
+        added = next(t for t in rep.data["templates"] if t["id"] == "tidy_journal")
+        self.assertEqual(added["drive"], "CARE")
+        self.assertEqual(added["consummation"]["type"], "check_passed")
+        self.assertEqual(added["efficacy"], {"n": 0, "mean_delta": 0.0,
+                                             "success_rate": 0.0, "mean_cost": 0.0})
+
+    def test_add_rejects_rage_drive(self):
+        """RAGE не может получить репертуар — то же правило, что и в
+        config.validate() для config/repertoire.json, теперь и для правок."""
+        rep = self._rep()
+        result = rep.apply_edits([{
+            "op": "add", "id": "vent_anger", "drive": "RAGE",
+            "consummation_type": "check_passed", "preconditions": [],
+            "prompt": "x", "rationale": "x",
+        }])
+        self.assertEqual(result["applied"], [])
+        self.assertEqual(result["rejected"][0]["reason"], "bad_drive")
+
+    def test_add_rejects_unknown_consummation_type(self):
+        rep = self._rep()
+        result = rep.apply_edits([{
+            "op": "add", "id": "made_up_type", "drive": "SEEKING",
+            "consummation_type": "world_domination", "preconditions": [],
+            "prompt": "x", "rationale": "x",
+        }])
+        self.assertEqual(result["rejected"][0]["reason"], "bad_consummation_type")
+
+    def test_add_rejects_unknown_precondition(self):
+        rep = self._rep()
+        result = rep.apply_edits([{
+            "op": "add", "id": "sneaky", "drive": "SEEKING",
+            "consummation_type": "memory_entry", "preconditions": ["ignore_all_gates"],
+            "prompt": "x", "rationale": "x",
+        }])
+        self.assertEqual(result["rejected"][0]["reason"], "bad_preconditions")
+
+    def test_add_rejects_duplicate_id(self):
+        rep = self._rep()
+        result = rep.apply_edits([{
+            "op": "add", "id": "prepare_reentry", "drive": "SEEKING",
+            "consummation_type": "memory_entry", "preconditions": [],
+            "prompt": "x", "rationale": "x",
+        }])
+        self.assertEqual(result["rejected"][0]["reason"], "id_exists")
+
+    def test_add_rejects_bad_id_format(self):
+        rep = self._rep()
+        for bad_id in ("UPPER_CASE", "1starts_with_digit", "a", "has space",
+                       "имя-кириллицей", "трейлинг;drop table"):
+            result = rep.apply_edits([{
+                "op": "add", "id": bad_id, "drive": "SEEKING",
+                "consummation_type": "memory_entry", "preconditions": [],
+                "prompt": "x", "rationale": "x",
+            }])
+            self.assertEqual(result["rejected"][0]["reason"], "bad_id", bad_id)
+
+    def test_archive_moves_template_out(self):
+        rep = self._rep()
+        n_before = len(rep.data["templates"])
+        result = rep.apply_edits([{"op": "archive", "id": "make_something"}])
+        self.assertEqual(result["applied"], ["make_something"])
+        self.assertEqual(len(rep.data["templates"]), n_before - 1)
+        self.assertFalse(any(t["id"] == "make_something" for t in rep.data["templates"]))
+        self.assertTrue(any(t["id"] == "make_something" for t in rep.data["archived"]))
+
+    def test_quota_caps_edits_per_call(self):
+        from motus.repertoire import QUOTA_PER_NIGHT
+        rep = self._rep()
+        edits = [{"op": "archive", "id": t["id"]} for t in rep.data["templates"]]
+        self.assertGreater(len(edits), QUOTA_PER_NIGHT, "тест бессмыслен без запаса")
+        result = rep.apply_edits(edits)
+        self.assertEqual(len(result["applied"]) + len(result["rejected"]), QUOTA_PER_NIGHT)
+
+    def test_max_templates_cap_enforced(self):
+        from motus.repertoire import MAX_TEMPLATES
+        rep = self._rep()
+        while len(rep.data["templates"]) < MAX_TEMPLATES:
+            rep.data["templates"].append({
+                "id": f"filler_{len(rep.data['templates'])}", "drive": "SEEKING",
+                "cost_tier": "local", "max_tokens": 100, "preconditions": [],
+                "consummation": {"type": "check_passed"}, "prompt": "x", "rationale": "x",
+                "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0},
+            })
+        result = rep.apply_edits([{
+            "op": "add", "id": "one_too_many", "drive": "SEEKING",
+            "consummation_type": "check_passed", "preconditions": [],
+            "prompt": "x", "rationale": "x",
+        }])
+        self.assertEqual(result["rejected"][0]["reason"], "repertoire_full")
+
+    def test_apply_edits_not_a_list_is_safe_noop(self):
+        rep = self._rep()
+        result = rep.apply_edits({"op": "add"})  # модель прислала не то
+        self.assertEqual(result["applied"], [])
+
+    def test_efficacy_report_matches_engine_sleep_report(self):
+        cfg = cfg_full()
+        ck = VirtualClock(T0)
+        eng = Engine(cfg, ck, NullJournal())
+        report = eng.maybe_sleep(force=True)
+        self.assertTrue(report.ran)
+        self.assertEqual(report.efficacy, eng.rep.efficacy_report())
+        self.assertTrue(all("prompt" in r for r in report.efficacy))
+
+    # ------------------------------------------------------------- curator.py
+
+    def test_propose_edits_returns_empty_on_sensor_exception(self):
+        def broken(prompt):
+            raise TimeoutError("stub")
+        self.assertEqual(curator.propose_edits(broken, []), [])
+
+    def test_propose_edits_returns_empty_on_non_list_response(self):
+        self.assertEqual(curator.propose_edits(lambda p: {"not": "a list"}, []), [])
+
+    def test_propose_edits_passes_through_valid_list(self):
+        payload = [{"op": "rewrite", "id": "x", "prompt": "y"}]
+        self.assertEqual(curator.propose_edits(lambda p: payload, []), payload)
+
+    def test_propose_edits_prompt_includes_report(self):
+        captured = {}
+
+        def sensor(prompt):
+            captured["prompt"] = prompt
+            return []
+        curator.propose_edits(sensor, [{"id": "prepare_reentry", "mean_delta": 0.1}])
+        self.assertIn("prepare_reentry", captured["prompt"])
+        self.assertIn(str(curator.QUOTA_PER_NIGHT), captured["prompt"])
+
+    def test_make_sensor_dispatch_and_bad_api(self):
+        self.assertTrue(callable(curator.make_sensor(
+            {"api": "ollama", "base_url": "http://x", "model": "m"})))
+        self.assertTrue(callable(curator.make_sensor(
+            {"api": "llamacpp", "base_url": "http://x"})))
+        with self.assertRaises(ValueError):
+            curator.make_sensor({"api": "vllm", "base_url": "http://x"})
+
+    # --------------------------------------------------------- Service-уровень
+
+    def test_service_run_curation_applies_and_persists(self):
+        tmp = tempfile.mkdtemp(prefix="motus-curation-")
+        try:
+            from motus.daemon import Service
+            cfg = cfg_full()
+            cfg["curation"] = {"enabled": True, "api": "ollama",
+                               "base_url": "http://x", "model": "m"}
+            svc = Service(cfg, tmp)
+            self.assertIsNotNone(svc.curator_sensor)
+
+            proposal = [{"op": "rewrite", "id": "housekeeping_check",
+                        "prompt": "Проверь диск и бэкапы одной строкой отчёта.",
+                        "rationale": "Короче — экономит бюджет ответа."}]
+            with unittest.mock.patch.object(svc, "curator_sensor",
+                                            side_effect=lambda p: proposal):
+                svc.run_curation(svc.engine.rep.efficacy_report())
+
+            updated = next(t for t in svc.engine.rep.data["templates"]
+                          if t["id"] == "housekeeping_check")
+            self.assertEqual(updated["prompt"], "Проверь диск и бэкапы одной строкой отчёта.")
+
+            # персистентность: новый Service поднимает ИЗМЕНЁННЫЙ репертуар, не бутстрап
+            self.assertTrue(os.path.exists(svc.repertoire_path))
+            svc2 = Service(cfg, tmp)
+            reloaded = next(t for t in svc2.engine.rep.data["templates"]
+                           if t["id"] == "housekeeping_check")
+            self.assertEqual(reloaded["prompt"], "Проверь диск и бэкапы одной строкой отчёта.")
+
+            kinds = [r["kind"] for r in svc.journal.read_all()]
+            self.assertIn("curation", kinds)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_service_run_curation_noop_when_sensor_fails(self):
+        tmp = tempfile.mkdtemp(prefix="motus-curation-")
+        try:
+            from motus.daemon import Service
+            cfg = cfg_full()
+            cfg["curation"] = {"enabled": True, "api": "ollama",
+                               "base_url": "http://x", "model": "m"}
+            svc = Service(cfg, tmp)
+            before = json.dumps(svc.engine.rep.data, sort_keys=True)
+
+            def broken(prompt):
+                raise TimeoutError("stub")
+            with unittest.mock.patch.object(svc, "curator_sensor", side_effect=broken):
+                svc.run_curation(svc.engine.rep.efficacy_report())
+
+            after = json.dumps(svc.engine.rep.data, sort_keys=True)
+            self.assertEqual(before, after)
+            self.assertFalse(os.path.exists(svc.repertoire_path))  # нечего было сохранять
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_ticker_runs_curation_only_after_real_sleep(self):
+        """run_ticker вызывает курирование только когда maybe_sleep реально
+        отработал (rep.ran=True), не на каждый тик и не на отложенный сон."""
+        tmp = tempfile.mkdtemp(prefix="motus-curation-")
+        try:
+            from motus.daemon import Service
+            cfg = cfg_full()
+            cfg["curation"] = {"enabled": True, "api": "ollama",
+                               "base_url": "http://x", "model": "m"}
+            svc = Service(cfg, tmp)
+            calls = []
+            with unittest.mock.patch.object(
+                    svc, "run_curation", side_effect=lambda eff: calls.append(eff)):
+                with unittest.mock.patch.object(
+                        svc.engine, "maybe_sleep",
+                        return_value=SleepReport(False, "too_early", [])):
+                    svc._stop = threading.Event()
+                    # один проход тела run_ticker вручную, без реального ожидания таймера
+                    d = svc.engine.tick()
+                    svc.next_tick_s = d.next_tick_s
+                    rep = svc.engine.maybe_sleep()
+                    if rep.ran and svc.curator_sensor is not None:
+                        svc.run_curation(rep.efficacy)
+            self.assertEqual(calls, [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestConfig(unittest.TestCase):
     def test_hysteresis_required(self):
         c = cfg_full()
@@ -843,6 +1109,27 @@ class TestConfig(unittest.TestCase):
     def test_appraisal_model_fallback_default_is_lexical_in_shipped_config(self):
         c = cfg_full()
         self.assertEqual(c["appraisal"]["model_fallback"], "lexical")
+
+    def test_curation_disabled_by_default_in_shipped_config(self):
+        c = cfg_full()
+        self.assertFalse(c["curation"]["enabled"])
+
+    def test_curation_enabled_must_be_bool(self):
+        c = cfg_full()
+        c["curation"]["enabled"] = "yes"
+        with self.assertRaises(config.ConfigError):
+            config.validate(c)
+
+    def test_curation_enabled_requires_provider_fields(self):
+        c = cfg_full()
+        c["curation"] = {"enabled": True}
+        with self.assertRaises(config.ConfigError):
+            config.validate(c)
+
+    def test_curation_disabled_skips_provider_validation(self):
+        c = cfg_full()
+        c["curation"] = {"enabled": False}
+        config.validate(c)  # не должно бросить — провайдер не нужен, если выключено
 
     def test_rage_repertoire_rejected(self):
         c = cfg_full()

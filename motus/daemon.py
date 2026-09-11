@@ -28,7 +28,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional
 
-from . import __version__, appraisal, config
+from . import __version__, appraisal, config, curator
 from .clock import Clock
 from .engine import Engine
 from .events import Event
@@ -60,6 +60,7 @@ class Service:
         self.var_dir = var_dir
         os.makedirs(var_dir, exist_ok=True)
         self.state_path = os.path.join(var_dir, "state.json")
+        self.repertoire_path = os.path.join(var_dir, "repertoire.json")
         self.journal = Journal(os.path.join(var_dir, "journal"))
         self.clock = Clock()
         self.lock = threading.Lock()
@@ -67,27 +68,42 @@ class Service:
         sensor = None
         if cfg.get("appraisal", {}).get("mode") == "model":
             sensor = appraisal.make_sensor(cfg["appraisal"])
-            self._warm_up_sensor(sensor)
+            self._warm_up_sensor(sensor, self.journal)
         # sensor=None → Engine берёт appraisal.mode из конфига (lexical|off).
         self.engine = Engine(cfg, self.clock, self.journal, st, sensor=sensor)
+        self._load_repertoire()  # поверх бутстрап-дефолта из config/repertoire.json
+        self.curator_sensor = None
+        if cfg.get("curation", {}).get("enabled"):
+            self.curator_sensor = curator.make_sensor(cfg["curation"])
         self.started = time.time()
         self.next_tick_s = float(cfg["heartbeat"]["tick_min_s"])
         self._stop = threading.Event()
 
     @staticmethod
-    def _warm_up_sensor(sensor: Any) -> None:
-        """Фоновый прогрев L-1: первый вызов llama-server грузит ~1 ГБ весов и
-        считает весь few-shot промпт без кэша — это 15–25 с, дольше любого
-        timeout_s. Прогнать один холостой запрос в отдельном потоке, чтобы к
-        первому реальному сообщению сервер был горячим. Best-effort: сбой (сервер
-        ещё не поднялся, выключен) молча игнорируется — appraise_text всё равно
-        переживёт отказ сенсора."""
+    def _warm_up_sensor(sensor: Any, journal: Journal) -> None:
+        """Фоновый прогрев L-1: первый вызов llama-server/ollama грузит веса и
+        считает весь few-shot промпт без кэша — секунды-десятки секунд, дольше
+        любого timeout_s. Прогнать один холостой запрос в отдельном потоке, чтобы
+        к первому реальному сообщению сервер был горячим. Best-effort: отдельные
+        неудачи не мешают появлению — сбой сенсора appraise_text переживёт и без
+        прогрева (нули или словарный fallback). Раньше итог прогрева нигде не
+        отмечался — 6 неудач подряд (например, ПК выключен) проходили тихо, и
+        единственным способом узнать было ждать первую appraisal_invalid на
+        живом сообщении. Теперь полный отказ (все 6 попыток) пишется в журнал
+        как error — тем же kind, что и другие сбои демона (tick_failed,
+        corrupt_state_snapshot). Успех не логируется — как и успешная загрузка
+        state.json, это штатный путь."""
         def run() -> None:
-            for _ in range(6):
+            for attempt in range(1, 7):
                 try:
                     sensor("прогрев")
                     return
-                except Exception:
+                except Exception as exc:
+                    if attempt == 6:
+                        journal.write("error", time.time(), {
+                            "what": "sensor_warmup_failed", "attempts": attempt,
+                            "error": repr(exc),
+                        })
                     time.sleep(10)
         threading.Thread(target=run, name="l1-warmup", daemon=True).start()
 
@@ -119,6 +135,51 @@ class Service:
             json.dump(self.engine.state.to_dict(), fh, ensure_ascii=False)
         os.replace(tmp, self.state_path)
 
+    # --------------------------------------------------------- репертуар (ночь)
+
+    def _load_repertoire(self) -> None:
+        """Поверх бутстрап-дефолта из config/repertoire.json (уже в
+        self.engine.rep.data) — если есть эволюционировавший снапшот на диске
+        (правки прошлых ночей), он и есть источник правды. Тот же принцип, что
+        у _load_state: битый файл — громко в журнал, старт с бутстрапа, не молча."""
+        try:
+            with open(self.repertoire_path, "r", encoding="utf-8") as fh:
+                raw = fh.read()
+        except OSError:
+            return
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict) or "templates" not in data:
+                raise ValueError("нет ключа templates")
+        except ValueError as exc:
+            self.journal.write("error", time.time(),
+                               {"what": "corrupt_repertoire_snapshot", "detail": str(exc)})
+            try:
+                os.replace(self.repertoire_path, self.repertoire_path + ".corrupt")
+            except OSError:
+                pass
+            return
+        self.engine.rep.data = data
+
+    def save_repertoire(self) -> None:
+        self.engine.rep.save(self.repertoire_path)
+
+    def run_curation(self, efficacy: Any) -> None:
+        """Шаг 2 ночного цикла (docs/01-structure.md §7). Вызывается только из
+        run_ticker после успешного (не отложенного) сна. Отказ сенсора —
+        curator.propose_edits уже ловит и отдаёт [] — цикл просто ничего не
+        меняет, никакого шума."""
+        edits = curator.propose_edits(self.curator_sensor, efficacy)
+        if not edits:
+            self.journal.write("curation", self.engine.state.t,
+                               {"proposed": 0, "applied": [], "rejected": []})
+            return
+        result = self.engine.rep.apply_edits(edits)
+        self.journal.write("curation", self.engine.state.t,
+                           {"proposed": len(edits), **result})
+        if result["applied"]:
+            self.save_repertoire()
+
     # ------------------------------------------------------------- фоновый цикл
 
     def run_ticker(self) -> None:
@@ -127,7 +188,9 @@ class Service:
                 with self.lock:
                     d = self.engine.tick()
                     self.next_tick_s = d.next_tick_s
-                    self.engine.maybe_sleep()
+                    rep = self.engine.maybe_sleep()
+                    if rep.ran and self.curator_sensor is not None:
+                        self.run_curation(rep.efficacy)
                     self.save_state()
             except Exception as exc:  # демон не имеет права умирать от одного тика
                 self.journal.write("error", time.time(), {"what": "tick_failed",
@@ -172,9 +235,43 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return {}
 
-    # ------------------------------------------------------------------- GET
+    # -------------------------------------------------------- обёртка/логирование
 
     def do_GET(self) -> None:
+        self._guarded(self._handle_get)
+
+    def do_POST(self) -> None:
+        self._guarded(self._handle_post)
+
+    def _guarded(self, handler) -> None:
+        """Любая необработанная ошибка внутри ветки эндпоинта раньше просто
+        валила соединение (http.server печатает трейсбек в stderr, но это не
+        попадает в структурный журнал var/journal/*.jsonl — только сырой
+        stderr, который никто не парсит). Теперь — 500 клиенту и запись в
+        журнал с путём и текстом ошибки, тем же способом, что tick_failed
+        в run_ticker."""
+        try:
+            handler()
+        except Exception as exc:
+            svc = self.service
+            if svc is not None:
+                try:
+                    svc.journal.write("error", time.time(), {
+                        "what": "handler_exception",
+                        "path": self.path.split("?")[0],
+                        "method": self.command,
+                        "error": repr(exc),
+                    })
+                except Exception:
+                    pass  # журнал сам не пишется — не молчать полностью, но и не падать вдвойне
+            try:
+                self._send(500, {"error": "internal error"})
+            except Exception:
+                pass  # соединение могло уже порваться — второй сбой здесь не спасти
+
+    # ------------------------------------------------------------------- GET
+
+    def _handle_get(self) -> None:
         svc = self.service
         path = self.path.split("?")[0]
         if self._blocked(path):
@@ -235,7 +332,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------------ POST
 
-    def do_POST(self) -> None:
+    def _handle_post(self) -> None:
         svc = self.service
         path = self.path.split("?")[0]
         if self._blocked(path):
