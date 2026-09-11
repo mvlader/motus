@@ -23,6 +23,14 @@ class Budget:
 
     def may_initiate(self, st: State) -> Tuple[bool, str]:
         """Возвращает (можно, причина отказа). Причина уходит в журнал."""
+        if not self.cfg.get("initiation_enabled", True):
+            # Канала доставки проактивных сообщений (Tier 2) ещё нет: плагин
+            # openclaw читает только карточку и события. При initiation_enabled=false
+            # движок не тратит токен и не ставит initiation_pending — иначе
+            # каждая инициация «висит без ответа» ровно потому, что её никто не
+            # отправлял, и через unanswered_after_s накручивается act_penalty.
+            # Осознанный шаг фазы 2 «блокировка проактивных сообщений».
+            return False, "initiation_disabled"
         if st.initiation_pending:
             # Второе сообщение не отправляется, пока первое не получило ответа и
             # не разрешилось штрафом. Без этого правила бюджет всё равно

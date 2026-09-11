@@ -78,19 +78,28 @@ MOTUS оценит текст словарём (~1 мс) и **сразу его 
 
 ---
 
-## Фоновые задачи (позже)
+## Фоновые задачи (Tier 1)
+
+Это делает **не плагин**, а отдельный исполнитель `deploy/tier1_executor.py`
+(таймер `motus-tier1` в grach, `User=openclaw`). Плагину здесь делать нечего: он
+работает только когда есть живой ход, а задачи нужны в тишине.
 
 ```
-GET /task/next   →   {"task": {"template_id": "...", ...} | null, "tier": 1}
+GET /task/next   →   {"task": {"template_id": "...", "allowed_tools": [...],
+                               "consummation": {"type": "..."}, ...} | null, "tier": 1}
 ```
 
-Выполнить **без единой отправки пользователю**, затем:
+Исполнитель: один `openclaw agent exec --isolated` (без каналов — отправить
+ничего физически нельзя), результат пишется в файл, факт проверяется **кодом**
+(файл создан и свеж), затем:
 
 ```
-POST /consummation   {"template_id": "<из задачи>", "verified": true}
+POST /consummation   {"template_id": "<из задачи>", "verified": true|false, "cost": <токены>}
+POST /llm_call        {"model": "...", "purpose": "task", "tokens_in": N, "tokens_out": M, "template_id": "..."}
 ```
 
-Без этого драйвы SEEKING / CARE / PLAY гасить нечем, кроме разговора.
+Без этого драйвы SEEKING / CARE / PLAY / FEAR / PANIC гасить нечем, кроме
+разговора, и система копит активацию.
 
 ---
 

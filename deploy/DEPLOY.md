@@ -29,6 +29,7 @@ MOTUS живёт в **отдельном контейнере `motus`**, изо�
 | публичный API | `0.0.0.0:18790` в `motus`; Incus proxy device `motus-api` на `grach` → `127.0.0.1:18790` внутри grach |
 | админ API | `/run/motusd/adm.sock` (600, motus) — только внутри контейнера `motus` |
 | датчик железа | `deploy/motus-somatic.{service,timer}` внутри `grach`, `User=motus-probe`, код `/opt/motus-probe/somatic_probe.py` |
+| исполнитель задач (Tier 1) | `deploy/motus-tier1.{service,timer}` внутри `grach`, `User=openclaw`, код `/opt/motus-tier1/tier1_executor.py`; дёргает `GET /task/next` → `openclaw agent exec --isolated` → `POST /consummation` |
 
 ## Развернуть с нуля
 
@@ -69,7 +70,25 @@ incus file push deploy/motus-somatic.timer   grach/etc/systemd/system/
 incus exec grach -- systemctl enable --now motus-somatic.timer
 
 # 7. плагин openclaw — см. deploy/openclaw-plugin/README.md
+
+# 8. исполнитель фоновых задач Tier 1 (в grach, от пользователя openclaw)
+incus exec grach -- mkdir -p /opt/motus-tier1
+incus file push deploy/tier1_executor.py grach/opt/motus-tier1/tier1_executor.py
+incus exec grach -- chmod -R a+rX /opt/motus-tier1
+incus file push deploy/motus-tier1.service grach/etc/systemd/system/
+incus file push deploy/motus-tier1.timer   grach/etc/systemd/system/
+# ПЕРВЫЙ ПРОГОН — вручную и под наблюдением (проверить, что --isolated не режет
+# нужные задаче инструменты и что ход НЕ уходит ни в один канал):
+incus exec grach -- sudo -u openclaw MOTUS_TIER1_STATE=/tmp/t1 \
+  python3 /opt/motus-tier1/tier1_executor.py --dry-run
+incus exec grach -- systemctl enable --now motus-tier1.timer
 ```
+
+**Термобюджет.** Каждый прогон с задачей — полный ход openclaw. На Pi 5 под
+нагрузкой это греет (в логах доходило до soft-limit 85 °C). `motus-tier1.service`
+уже стоит с `Nice=15 CPUWeight=20 CPUQuota=60%`; если Pi без активного охлаждения
+— поднять интервал таймера или указать лёгкую локальную модель через
+`MOTUS_TIER1_MODEL`.
 
 ## Обновить код
 
@@ -88,10 +107,22 @@ incus exec motus -- bash -c 'chmod -R a+rX /opt/motus && systemctl restart motus
 incus exec motus -- curl -s --unix-socket /run/motusd/adm.sock http://x/state/raw | python3 -m json.tool
 incus exec motus -- curl -s --unix-socket /run/motusd/adm.sock 'http://x/journal/tail?n=50'
 incus exec motus -- curl -s --unix-socket /run/motusd/adm.sock -XPOST http://x/sleep -d '{"force":true}'
+
+# Tier 1: что делал исполнитель
+incus exec grach -- journalctl -u motus-tier1.service --since today
+incus exec grach -- ls -lt /var/lib/motus-tier1/drops/     # результаты фоновых задач
 ```
 
-## Режим модели (`appraisal.mode: model`) — если понадобится
+## L-1: модель, а не словарь (`appraisal.mode: model`, умолчание с 2026-09-10)
 
-`llama-l1.service` тогда ставится **в контейнер `motus`** (не grach), модель на
-бинд-маунте, `appraisal.base_url: http://127.0.0.1:8080`. Термалка и цифры —
-`docs/04-model-l1.md`. По умолчанию не нужен: `mode: lexical`.
+По умолчанию `motusd` (в контейнере `motus`) на каждое текстовое событие ходит
+по LAN в ollama на ПК `192.168.2.27:11434` (`ge4b-heretic:latest`) — контейнер
+`motus` должен иметь сетевой доступ к этому адресу (проверить:
+`incus exec motus -- curl -s http://192.168.2.27:11434/api/tags`). Обоснование
+выбора модели, риски (зависимость от ПК, латентность) и live-бенчмарк —
+`docs/04-model-l1.md`.
+
+Альтернатива без сети — `llama-l1.service` **в контейнере `motus`** (не grach) с
+GGUF на бинд-маунте, `appraisal.api: llamacpp`, `base_url: http://127.0.0.1:8080`.
+На замерах она хуже (Qwen3-1.7B на CPU Pi проигрывает и словарю, и gemma4 на ПК),
+держим как запасной вариант на случай, если ПК окажется недоступен слишком часто.

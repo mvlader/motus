@@ -1,0 +1,13 @@
+# Раз в 15 минут проверяем, есть ли фоновая задача. Реальную частоту всё равно
+# режет MOTUS: task_min_interval_s=600 в конфиге + длина очереди репертуара +
+# min_score (насыщение репертуаром). Пустой прогон дёшев — один GET.
+[Unit]
+Description=MOTUS — проверка фоновых задач каждые 15 минут
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -3,14 +3,21 @@
 Ветви:
   * правила (детерминированные) — датчики, таймеры, коды ошибок (Appraiser.impulses);
   * оценка текста сообщения — по `Appraiser.mode`:
-      "lexical" (умолчание) — детерминированный словарь (lexicon_l1.py);
-      "model" — малая локальная модель как СЕНСОР, выход строго по схеме Appraisal;
+      "model" (умолчание) — модель как СЕНСОР, выход строго по схеме Appraisal;
       "off" — нули.
 
-Модель, если включена, ничего не рассказывает про эмоции: заполняет шесть полей с
-известными диапазонами. Дрейфовать негде, невалидная схема падает в нули и
-логируется как appraisal_invalid — отказ сенсора не должен двигать состояние.
-Почему словарь по умолчанию, а не модель — docs/04-model-l1.md.
+Модель ничего не рассказывает про эмоции: заполняет шесть полей с известными
+диапазонами. Дрейфовать негде, невалидная схема падает в нули и логируется как
+appraisal_invalid — отказ сенсора не должен двигать состояние.
+
+БЫЛ третий режим — "lexical", детерминированный словарь `lexicon_l1.py`. Отключён
+2026-09-10 по требованию пользователя: словарь один на язык, поддерживать его
+руками под каждый следующий язык он не хочет. Модель этого не требует — оценивает
+любой язык тем же промптом. Обоснование выбора конкретной модели (gemma-4 E4B
+`ge4b-heretic` вместо прежнего Qwen3-1.7B) — docs/04-model-l1.md, живые цифры —
+`tools/bench_l1_live.py`. `lexicon_l1.py` не удалён (референс, офлайн-бенчмарк),
+но из этого модуля больше не импортируется:
+    # from .lexicon_l1 import lexical_appraise
 """
 
 from __future__ import annotations
@@ -21,7 +28,7 @@ import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
 from .events import Appraisal, Event, Impulse
-from .lexicon_l1 import lexical_appraise
+# from .lexicon_l1 import lexical_appraise  # словарная математика отключена (см. выше)
 
 #: Промпт для режима "model" (по умолчанию L-1 работает без модели, см.
 #: lexicon_l1.py). Few-shot: без примеров Qwen3-0.6B/1.7B систематически заваливали
@@ -209,15 +216,26 @@ def ollama_sensor(cfg: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:
 class Appraiser:
     """Правила (события мира → импульсы) плюс оценка текста сообщения.
 
-    Текст оценивается одним из трёх способов (`mode`):
-      * "lexical" — детерминированный словарь (motus/lexicon_l1.py), **по умолчанию**.
-        Без модели, без сети, без задержки. Пять из шести полей Appraisal почти
-        чисто лексические, и на выборке GOLD словарь бьёт Qwen3-1.7B по ±1
-        (docs/04-model-l1.md). Основной путь.
-      * "model" — малая локальная модель через `sensor` (llama.cpp / ollama).
+    Текст оценивается одним из двух способов (`mode`):
+      * "model" — малая модель через `sensor` (llama.cpp / ollama), **по умолчанию**.
         Отказ модели → нули (docs/02-terms.md: «отказ сенсора не двигает
         состояние»), и это пишется в журнал как appraisal_invalid.
       * "off" — всегда нули, текст не оценивается вовсе.
+
+    ОТКЛЮЧЕНО (2026-09-10, по требованию пользователя): режим "lexical" —
+    детерминированный словарь `motus/lexicon_l1.py`. На русской выборке он был
+    точнее и безопаснее Qwen3-1.7B (docs/04-model-l1.md), но словарь один на
+    язык и держать его руками под каждый следующий язык пользователь не хочет.
+    Живое сравнение на той же выборке (`tools/bench_l1_live.py`, GOLD+HARD, 20
+    сообщений) с gemma-4 E4B (`ge4b-heretic` на ПК по LAN через ollama) дало
+    ±1 85% / вред 5% / false_alarm 0 — лучше и словаря (80%/15%), и прежнего
+    кандидата Qwen3-1.7B на Pi (55%/25%). Ветка словаря НЕ вызывается:
+        # if self.mode == "lexical":
+        #     return lexical_appraise(text, strict=self.lexical_strict)
+    Сам `lexicon_l1.py` и его тесты не удалены — референс и офлайн-инструмент
+    (`tools/bench_l1_model.py --lexical` для будущих сравнений), но из
+    боевого пути исключён. `lexical_strict` остаётся в конфиге как поле без
+    действия (dead config), пока словарный путь не понадобится снова.
 
     Совместимость: `Appraiser(sensor=fn)` без явного mode → "model" (так строят
     тесты и старый код).
@@ -226,7 +244,7 @@ class Appraiser:
     def __init__(self, sensor: Optional[Callable[[str], Any]] = None,
                  mode: Optional[str] = None, lexical_strict: bool = False) -> None:
         self.sensor = sensor
-        self.mode = mode or ("model" if sensor is not None else "lexical")
+        self.mode = mode or "model"
         self.lexical_strict = lexical_strict
         self.invalid_count = 0
         self.last_failed = False
@@ -235,8 +253,9 @@ class Appraiser:
         self.last_failed = False
         if self.mode == "off":
             return Appraisal()
-        if self.mode == "lexical":
-            return lexical_appraise(text, strict=self.lexical_strict)
+        # словарная математика отключена — см. докстринг класса.
+        # if self.mode == "lexical":
+        #     return lexical_appraise(text, strict=self.lexical_strict)
         # mode == "model"
         if not self.sensor:
             return Appraisal()
@@ -314,13 +333,24 @@ class Appraiser:
             s["thermal"] = max(0.0, min(1.0, (t - 55.0) / 30.0))
         if p.get("throttled"):
             s["thermal"] = max(s["thermal"], 0.8)
+
+        # integrity РЕКОНСТРУИРУЕТСЯ из фактов текущего опроса, а не тянется вниз
+        # монотонно. Старый код (`s["integrity"] = min(s["integrity"], ...)`) был
+        # храповиком: один опрос с services_ok=false ронял integrity до 0.5
+        # НАВСЕГДА — `min(0.5, 1.0)` так и остаётся 0.5, даже когда сервис
+        # вернулся. В логах это выглядело как «Часть окружения неисправна» на
+        # карточке ещё сутки после разовой недоступности openclaw.
+        components = []
         if "disk_free_frac" in p:
-            free = float(p["disk_free_frac"])
-            s["integrity"] = min(s["integrity"], max(0.0, min(1.0, free / 0.10)))
+            components.append(max(0.0, min(1.0, float(p["disk_free_frac"]) / 0.10)))
         if "services_ok" in p:
-            s["integrity"] = min(s["integrity"], 1.0 if p["services_ok"] else 0.5)
+            components.append(1.0 if p["services_ok"] else 0.5)
         if "integrity" in p:
+            # Явное значение датчика — приоритетнее любых производных.
             s["integrity"] = max(0.0, min(1.0, float(p["integrity"])))
+        elif components:
+            s["integrity"] = min(components)
+
         if "energy" in p:
             s["energy"] = max(0.0, min(1.0, float(p["energy"])))
         return s

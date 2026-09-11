@@ -208,7 +208,13 @@ class Homeostat:
             s = self.effective_setpoint(st, name)
             tau = self.tau_eff(st, name)
             x = st.drives[name]
-            st.drives[name] = _clip(s + (x - s) * math.exp(-dt / tau), 0.0, 1.0)
+            v = _clip(s + (x - s) * math.exp(-dt / tau), 0.0, 1.0)
+            # Фазический драйв с сетпоинтом 0 экспонентой в ноль не приходит:
+            # x·exp(-dt/τ) уходит в денормализованные ~1e-38 и висит там в
+            # снапшоте (FEAR=4e-34 в state/raw). Ниже порога осмысленности —
+            # это ноль. Порог на 20+ порядков ниже любой рабочей величины
+            # драйва, композируемость по Δt не трогает.
+            st.drives[name] = 0.0 if 0.0 < v < 1e-12 else v
 
         # Штраф за молчание спадает.
         st.act_penalty *= math.exp(-dt / self.cfg["budget"]["penalty_tau_s"])

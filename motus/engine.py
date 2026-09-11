@@ -74,15 +74,21 @@ class Engine:
         self.bg = Budget(cfg)
         self.rep = Repertoire(cfg, self.h)
         # Явно переданный sensor означает режим "model" (так строят тесты и
-        # daemon при appraisal.mode=model); иначе — режим из конфига,
-        # по умолчанию "lexical" (детерминированный словарь, docs/04-model-l1.md).
+        # daemon при appraisal.mode=model); иначе — режим из конфига, по
+        # умолчанию "model" (словарная математика отключена — см. appraisal.py).
         ap_cfg = cfg.get("appraisal", {})
-        ap_mode = "model" if sensor is not None else ap_cfg.get("mode", "lexical")
+        ap_mode = "model" if sensor is not None else ap_cfg.get("mode", "model")
+        # lexical_strict — параметр отключённого словарного пути, ни на что не
+        # влияет; передаётся дальше только чтобы не ломать старые конфиги/тесты.
         self.ap = Appraiser(sensor, mode=ap_mode,
                             lexical_strict=bool(ap_cfg.get("lexical_strict", False)))
         self.state = st or State.initial(cfg, clock.now())
         self._last_regime = self.state.regime
         self._last_card = ""
+        #: Отложенный сон логируется один раз за эпизод, а не на каждом тике:
+        #: run_ticker зовёт maybe_sleep() каждые 45–600 с, и незатухающая петля
+        #: иначе засыпала бы журнал записями "sleep deferred".
+        self._sleep_deferred_logged = False
         self.journal.write(
             "boot", self.state.t,
             {"version": cfg.get("schema"),
@@ -280,11 +286,16 @@ class Engine:
         s = self.cfg["sleep"]
         if not force:
             if st.t - st.last_sleep_t < s["period_s"]:
+                self._sleep_deferred_logged = False
                 return SleepReport(False, "too_early", [])
             if self.h.arousal(st) > s["max_arousal"]:
                 # Отложенный сон логируется: это индикатор незатухающей петли.
-                self.journal.write("sleep", st.t, {"deferred": True,
-                                                   "arousal": round(self.h.arousal(st), 4)})
+                # Один раз за эпизод — сброс флага при удачном сне или при
+                # возврате в "too_early" после следующего периода.
+                if not self._sleep_deferred_logged:
+                    self.journal.write("sleep", st.t, {"deferred": True,
+                                                       "arousal": round(self.h.arousal(st), 4)})
+                    self._sleep_deferred_logged = True
                 return SleepReport(False, "aroused", [])
 
         lam = s["lambda"]
@@ -294,6 +305,7 @@ class Engine:
             st.habituation[k] *= 0.5
         self.rep.expire(st.t, st)
         st.last_sleep_t = st.t
+        self._sleep_deferred_logged = False
 
         eff = [
             {"id": t["id"], "drive": t["drive"], **t.get("efficacy", {}),

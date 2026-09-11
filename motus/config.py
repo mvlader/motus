@@ -102,6 +102,11 @@ def validate(cfg: Dict[str, Any]) -> None:
         if d["kind"] == "phasic" and name != "PANIC" and d["setpoint"] != 0.0:
             raise ConfigError(f"{name}: у фазического драйва сетпоинт должен быть 0")
 
+    if "initiation_enabled" in cfg["budget"] and not isinstance(
+        cfg["budget"]["initiation_enabled"], bool
+    ):
+        raise ConfigError("budget.initiation_enabled: ожидается true|false")
+
     hb = cfg["heartbeat"]
     if hb["tick_min_s"] >= hb["tick_max_s"]:
         raise ConfigError("tick_min_s должен быть меньше tick_max_s")
@@ -118,9 +123,11 @@ def validate(cfg: Dict[str, Any]) -> None:
             raise ConfigError(f"в лексиконе нет режима {name}")
 
     ap = cfg.get("appraisal", {})
-    mode = ap.get("mode", "lexical")
-    if mode not in ("lexical", "model", "off"):
-        raise ConfigError(f"appraisal.mode: ожидается lexical|model|off, получено {mode!r}")
+    mode = ap.get("mode", "model")
+    # "lexical" убран из допустимых значений 2026-09-10: словарная математика
+    # L-1 отключена (appraisal.py) — один словарь на язык пользователю не подошёл.
+    if mode not in ("model", "off"):
+        raise ConfigError(f"appraisal.mode: ожидается model|off, получено {mode!r}")
     if "lexical_strict" in ap and not isinstance(ap["lexical_strict"], bool):
         raise ConfigError("appraisal.lexical_strict: ожидается true|false")
     if mode == "model":

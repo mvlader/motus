@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import json
 import math
 import unittest.mock
 import os
+import pathlib
 import random
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -33,6 +36,12 @@ _spec = importlib.util.spec_from_file_location("somatic_probe", _probe_path)
 somatic_probe = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(somatic_probe)
 
+_t1_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "deploy", "tier1_executor.py")
+_t1_spec = importlib.util.spec_from_file_location("tier1_executor", _t1_path)
+tier1_executor = importlib.util.module_from_spec(_t1_spec)
+_t1_spec.loader.exec_module(tier1_executor)
+
 T0 = 1767225600.0  # фиксированная точка отсчёта, чтобы тесты не зависели от «сегодня»
 
 
@@ -43,6 +52,15 @@ def cfg_full():
 def _nonzero(a) -> int:
     return sum(1 for v in (a.valence, a.threat, a.novelty, a.social_warmth, a.loss) if v) \
         + int(a.agency_blocked)
+
+
+def cfg_initiating():
+    """Конфиг с включёнными проактивными сообщениями. В default.json они выключены
+    (нет канала доставки Tier 2), но тесты самой машинерии инициации опираются на
+    неё явно."""
+    c = copy.deepcopy(config.load())
+    c["budget"]["initiation_enabled"] = True
+    return c
 
 
 def cfg_static():
@@ -125,6 +143,15 @@ class TestDynamics(unittest.TestCase):
         h.apply_impulse(s, Impulse("RAGE", 0.8, "x"))
         h.advance(s, T0 + 3600)
         self.assertLess(s.drives["RAGE"], 0.01)
+
+    def test_phasic_floors_to_exact_zero_not_denormal(self):
+        """FEAR=4e-34 в state/raw: экспонента к сетпоинту 0 не приходит, а виснет
+        в денормализованных. Ниже 1e-12 — это ноль."""
+        cfg = cfg_full()
+        h, s, _ = mk(cfg)
+        h.apply_impulse(s, Impulse("FEAR", 0.9, "x"))
+        h.advance(s, T0 + 6 * 3600)
+        self.assertEqual(s.drives["FEAR"], 0.0)
 
     def test_tonic_returns_to_setpoint(self):
         cfg = cfg_static()
@@ -277,8 +304,9 @@ class TestVerbalizer(unittest.TestCase):
 
 class TestBehaviour(unittest.TestCase):
     def test_no_initiation_while_gate_closed(self):
-        """Поведенческий булев критерий из docs/01-structure.md §9."""
-        cfg = cfg_full()
+        """Поведенческий булев критерий из docs/01-structure.md §9.
+        С включённой инициацией — иначе tier 2 не наступает вовсе и проверять нечего."""
+        cfg = cfg_initiating()
         ck = VirtualClock(T0)
         eng = Engine(cfg, ck, NullJournal())
         violations = 0
@@ -307,7 +335,7 @@ class TestBehaviour(unittest.TestCase):
 
     def test_silence_does_not_produce_spam(self):
         """72 часа полной тишины не должны давать больше горстки сообщений."""
-        cfg = cfg_full()
+        cfg = cfg_initiating()
         ck = VirtualClock(T0)
         eng = Engine(cfg, ck, NullJournal())
         n = 0
@@ -326,7 +354,7 @@ class TestBehaviour(unittest.TestCase):
 
         def run(execute: bool) -> int:
             ck = VirtualClock(T0)
-            eng = Engine(cfg_full(), ck, NullJournal())
+            eng = Engine(cfg_initiating(), ck, NullJournal())
             n = 0
             for _ in range(int(72 * 3600 / 300)):
                 ck.advance(300)
@@ -367,13 +395,29 @@ class TestBehaviour(unittest.TestCase):
         self.assertLessEqual(n_on / 72.0, 1.5, "больше полутора фоновых задач в час — это не фон")
 
     def test_unanswered_raises_threshold(self):
-        cfg = cfg_full()
+        cfg = cfg_initiating()
         ck = VirtualClock(T0)
         eng = Engine(cfg, ck, NullJournal())
         for _ in range(400):
             ck.advance(300)
             eng.tick(ck.now())
         self.assertGreater(eng.state.act_penalty, 0.0)
+
+    def test_initiation_disabled_by_default_no_phantom_penalty(self):
+        """default.json: проактив выключен. 72 ч тишины → ни одной инициации и
+        ноль act_penalty: движок не наказывает себя за неотправленные сообщения."""
+        cfg = cfg_full()
+        self.assertFalse(cfg["budget"].get("initiation_enabled", True))
+        ck = VirtualClock(T0)
+        eng = Engine(cfg, ck, NullJournal())
+        tier2 = 0
+        for _ in range(int(72 * 3600 / 300)):
+            ck.advance(300)
+            if eng.tick(ck.now()).tier == 2:
+                tier2 += 1
+        self.assertEqual(tier2, 0)
+        self.assertEqual(eng.state.act_penalty, 0.0)
+        self.assertFalse(eng.state.initiation_pending)
 
     def test_contact_resets_panic_and_forgives(self):
         cfg = cfg_full()
@@ -544,10 +588,14 @@ class TestAppraisal(unittest.TestCase):
         t = "спасибо большое! но опять не получилось, я застрял"
         self.assertEqual(lexical_appraise(t).__dict__, lexical_appraise(t).__dict__)
 
-    def test_appraiser_mode_default_is_lexical(self):
+    def test_appraiser_mode_default_is_model_null_without_sensor(self):
+        """Словарный режим отключён (2026-09-10): умолчание — "model", а без
+        сенсора это безопасные нули, не выдуманный сигнал. last_failed остаётся
+        False — это штатное отсутствие сенсора, не его отказ (иначе на каждое
+        сообщение без модели летела бы ложная appraisal_invalid)."""
         ap = appraisal_mod.Appraiser()
-        self.assertEqual(ap.mode, "lexical")
-        self.assertGreater(ap.appraise_text("огромное спасибо, ты супер!").valence, 0)
+        self.assertEqual(ap.mode, "model")
+        self.assertTrue(ap.appraise_text("огромное спасибо, ты супер!").is_null())
         self.assertFalse(ap.last_failed)
 
     def test_appraiser_mode_off_always_null(self):
@@ -575,23 +623,34 @@ class TestAppraisal(unittest.TestCase):
         self.assertLessEqual(_nonzero(strict), _nonzero(normal))
 
     def test_appraiser_lexical_strict_flag_flows_from_engine(self):
+        """lexical_strict больше ни на что не влияет (словарный путь отключён),
+        но поле остаётся в конфиге и должно доходить до Appraiser не теряясь —
+        плюс mode="off" по конфигу движка должен реально дойти до Appraiser."""
         cfg = cfg_full()
-        cfg["appraisal"] = {"mode": "lexical", "lexical_strict": True}
+        cfg["appraisal"] = {"mode": "off", "lexical_strict": True}
         eng = Engine(cfg, VirtualClock(T0), NullJournal())
         self.assertTrue(eng.ap.lexical_strict)
+        self.assertEqual(eng.ap.mode, "off")
 
-    def test_engine_lexical_mode_moves_state_deterministically(self):
+    def test_engine_model_mode_deterministic_with_stub_sensor(self):
+        """Детерминизм режима model: два движка с одним и тем же (детерминированным)
+        сенсором должны разойтись в снапшотах ровно на ноль."""
+        def stub(text: str):
+            return {"valence": -2, "threat": 0, "novelty": 0,
+                    "social_warmth": -2, "loss": 0, "agency_blocked": True}
+
         cfg = cfg_full()
-        eng_a = Engine(cfg, VirtualClock(T0), NullJournal())
-        eng_b = Engine(cfg, VirtualClock(T0), NullJournal())
+        eng_a = Engine(cfg, VirtualClock(T0), NullJournal(), sensor=stub)
+        eng_b = Engine(cfg, VirtualClock(T0), NullJournal(), sensor=stub)
         for eng in (eng_a, eng_b):
             eng.submit_event(Event("user_message", T0, {"text": "ты опять всё сломал, я в бешенстве"}))
         self.assertEqual(eng_a.state.snapshot(), eng_b.state.snapshot())
+        self.assertGreater(eng_a.state.drives["RAGE"], 0.0)  # сенсор реально подействовал
 
     def test_somatic_probe_edge_detects_integrity_drop_once(self):
         tmp = tempfile.mkdtemp(prefix="motus-probe-")
         try:
-            somatic_probe.STATE_FILE = __import__("pathlib").Path(tmp) / "prev.json"
+            somatic_probe.STATE_FILE = pathlib.Path(tmp) / "prev.json"
             with unittest.mock.patch.object(somatic_probe, "_read_int", return_value=None):
                 with unittest.mock.patch.object(somatic_probe, "_port_open", return_value=True):
                     p1 = somatic_probe.collect(18789)
@@ -612,6 +671,32 @@ class TestAppraisal(unittest.TestCase):
             {"energy": 0.7, "integrity": 1.0, "thermal": 0.0}, payload)
         self.assertGreater(s["thermal"], 0.7)     # горячо + троттлит
         self.assertLess(s["integrity"], 1.0)      # диск и сервис просели
+
+    def test_integrity_recovers_after_transient_service_blip(self):
+        """Регресс: один опрос services_ok=false ронял integrity до 0.5 навсегда
+        (храповик `min`). Теперь integrity реконструируется из фактов опроса и
+        восстанавливается, как только сервис вернулся."""
+        soma = {"energy": 0.7, "integrity": 1.0, "thermal": 0.4}
+        down = appraisal_mod.Appraiser.somatic_update(
+            soma, {"temp_c": 60.0, "disk_free_frac": 0.3, "services_ok": False})
+        self.assertEqual(down["integrity"], 0.5)
+        up = appraisal_mod.Appraiser.somatic_update(
+            down, {"temp_c": 60.0, "disk_free_frac": 0.3, "services_ok": True})
+        self.assertEqual(up["integrity"], 1.0)
+
+    def test_integrity_tracks_disk_pressure_both_ways(self):
+        soma = {"energy": 0.7, "integrity": 1.0, "thermal": 0.0}
+        tight = appraisal_mod.Appraiser.somatic_update(
+            soma, {"disk_free_frac": 0.05, "services_ok": True})
+        self.assertEqual(tight["integrity"], 0.5)
+        clear = appraisal_mod.Appraiser.somatic_update(
+            tight, {"disk_free_frac": 0.3, "services_ok": True})
+        self.assertEqual(clear["integrity"], 1.0)
+
+    def test_integrity_only_temp_probe_leaves_it_untouched(self):
+        soma = {"energy": 0.7, "integrity": 0.5, "thermal": 0.0}
+        s = appraisal_mod.Appraiser.somatic_update(soma, {"temp_c": 70.0})
+        self.assertEqual(s["integrity"], 0.5)
 
     def test_invalid_schema_falls_to_zero(self):
         for bad in (None, "нет", {"valence": 9}, {"valence": "x"}, {"threat": -1}, 42,
@@ -651,6 +736,12 @@ class TestConfig(unittest.TestCase):
             c[path[0]][path[1]] = 0
             with self.assertRaises(config.ConfigError):
                 config.validate(c)
+
+    def test_initiation_enabled_must_be_bool(self):
+        c = cfg_full()
+        c["budget"]["initiation_enabled"] = "yes"
+        with self.assertRaises(config.ConfigError):
+            config.validate(c)
 
     def test_rage_repertoire_rejected(self):
         c = cfg_full()
@@ -951,6 +1042,137 @@ class TestNonFiniteHardening(unittest.TestCase):
         d = eng.tick(T0 + 60)
         self.assertTrue(eng.state.has_finite_vector())
         self.assertIn(d.gate.regime, ("baseline", *cfg["drives"]))
+
+
+class TestTier1Executor(unittest.TestCase):
+    """Исполнитель фоновых задач: deploy/tier1_executor.py."""
+
+    def _args(self, tmp):
+        ns = argparse.Namespace(
+            motusd="http://x", state_dir=pathlib.Path(tmp),
+            workspace=pathlib.Path(tmp), openclaw="/bin/false",
+            oc_args="--isolated", model=None, task_timeout=5, dry_run=False,
+        )
+        return ns
+
+    def test_no_task_is_noop(self):
+        tmp = tempfile.mkdtemp(prefix="motus-t1-")
+        try:
+            calls = []
+            with unittest.mock.patch.object(tier1_executor, "_get",
+                                            return_value={"task": None}):
+                with unittest.mock.patch.object(tier1_executor, "_post",
+                                                side_effect=lambda *a, **k: calls.append(a)):
+                    rc = tier1_executor._run(self._args(tmp))
+            self.assertEqual(rc, 0)
+            self.assertEqual(calls, [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_refuses_task_carrying_outbound(self):
+        tmp = tempfile.mkdtemp(prefix="motus-t1-")
+        try:
+            task = {"template_id": "x", "drive": "PANIC", "prompt": "p",
+                    "allowed_tools": ["read", "outbound"], "consummation": {},
+                    "max_tokens": 100, "issued_t": 1.0}
+            with unittest.mock.patch.object(tier1_executor, "_get",
+                                            return_value={"task": task}):
+                with unittest.mock.patch.object(tier1_executor, "run_openclaw") as ro:
+                    with unittest.mock.patch.object(tier1_executor, "_post") as po:
+                        rc = tier1_executor._run(self._args(tmp))
+            self.assertEqual(rc, 1)
+            ro.assert_not_called()
+            po.assert_not_called()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_prompt_has_no_outbound_preamble(self):
+        p = tier1_executor.PREAMBLE.format(tools="read, memory", drop="/d",
+                                           max_tokens=200, prompt="сделай X")
+        self.assertIn("НЕ отправляй никаких сообщений", p)
+        self.assertIn("сделай X", p)
+        self.assertIn("/d", p)
+
+    def test_verify_requires_fresh_nonempty_result(self):
+        tmp = tempfile.mkdtemp(prefix="motus-t1-")
+        try:
+            drop = pathlib.Path(tmp) / "r"
+            now = time.time()
+            # хода не было / ошибка
+            self.assertFalse(tier1_executor.verify({}, drop, now, ok=False)[0])
+            # файла нет
+            self.assertFalse(tier1_executor.verify({}, drop, now, ok=True)[0])
+            # пустой
+            drop.write_text("", encoding="utf-8")
+            self.assertFalse(tier1_executor.verify({}, drop, now, ok=True)[0])
+            # старый (до старта хода)
+            drop.write_text("готово, записка собрана", encoding="utf-8")
+            os.utime(drop, (now - 100, now - 100))
+            self.assertFalse(tier1_executor.verify({}, drop, now, ok=True)[0])
+            # свежий и непустой
+            os.utime(drop, (now + 1, now + 1))
+            ok, why = tier1_executor.verify({"type": "artifact_created"}, drop, now, ok=True)
+            self.assertTrue(ok)
+            self.assertEqual(why, "artifact_created")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_full_cycle_reports_verified_consummation(self):
+        tmp = tempfile.mkdtemp(prefix="motus-t1-")
+        try:
+            task = {"template_id": "prepare_reentry", "drive": "PANIC",
+                    "prompt": "собери записку", "allowed_tools": ["read", "memory"],
+                    "consummation": {"type": "artifact_created"}, "max_tokens": 500,
+                    "issued_t": 111.0}
+            posted = []
+
+            def fake_run(openclaw, oc_args, cwd, message_file, timeout_s, model):
+                # «openclaw» пишет файл-результат, как велит преамбула
+                drop = pathlib.Path(tmp) / "drops" / "prepare_reentry-111"
+                drop.write_text("над чем работали: ...", encoding="utf-8")
+                return True, {"usage": {"input": 900, "output": 120}}, "{}"
+
+            with unittest.mock.patch.object(tier1_executor, "_get",
+                                            return_value={"task": task}):
+                with unittest.mock.patch.object(tier1_executor, "run_openclaw",
+                                                side_effect=fake_run):
+                    with unittest.mock.patch.object(
+                            tier1_executor, "_post",
+                            side_effect=lambda url, body, **k: posted.append((url, body)) or {}):
+                        rc = tier1_executor._run(self._args(tmp))
+
+            self.assertEqual(rc, 0)
+            cons = [b for u, b in posted if u.endswith("/consummation")]
+            self.assertEqual(len(cons), 1)
+            self.assertTrue(cons[0]["verified"])
+            self.assertEqual(cons[0]["template_id"], "prepare_reentry")
+            self.assertEqual(cons[0]["cost"], 1020.0)
+            calls = [b for u, b in posted if u.endswith("/llm_call")]
+            self.assertEqual(calls[0]["tokens_in"], 900)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_full_cycle_unverified_when_no_result_file(self):
+        tmp = tempfile.mkdtemp(prefix="motus-t1-")
+        try:
+            task = {"template_id": "make_something", "drive": "PLAY", "prompt": "p",
+                    "allowed_tools": ["read", "memory", "write"],
+                    "consummation": {"type": "artifact_created"}, "max_tokens": 500,
+                    "issued_t": 5.0}
+            posted = []
+            with unittest.mock.patch.object(tier1_executor, "_get",
+                                            return_value={"task": task}):
+                with unittest.mock.patch.object(
+                        tier1_executor, "run_openclaw",
+                        return_value=(True, {}, "")):  # ход прошёл, файла не создал
+                    with unittest.mock.patch.object(
+                            tier1_executor, "_post",
+                            side_effect=lambda url, body, **k: posted.append((url, body)) or {}):
+                        tier1_executor._run(self._args(tmp))
+            cons = [b for u, b in posted if u.endswith("/consummation")][0]
+            self.assertFalse(cons["verified"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
