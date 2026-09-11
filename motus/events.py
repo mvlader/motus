@@ -89,6 +89,25 @@ class Appraisal:
         out["agency_blocked"] = blocked
         return cls(**out)
 
+    @classmethod
+    def is_well_formed(cls, raw: Any) -> bool:
+        """Тот же разбор, что `parse()`, но без падения в нули — просто ответ на
+        «сенсор ответил валидной схемой?». Нужно отличать законный ответ «всё
+        нейтрально» (валидная схема, все поля 0 — `parse()` даст is_null()==True)
+        от отказа сенсора (мусор/вне диапазона — `parse()` тоже даст
+        is_null()==True, но это не то же самое): `parse()` эту разницу стирает,
+        а appraise_text() в Appraiser'е должна её видеть, чтобы не подменять
+        честный нулевой ответ запасным путём (см. appraisal.py, model_fallback)."""
+        if not isinstance(raw, dict):
+            return False
+        for field_name, (lo, hi) in cls.RANGES.items():
+            v = raw.get(field_name, 0)
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                return False
+            if not lo <= int(round(v)) <= hi:
+                return False
+        return isinstance(raw.get("agency_blocked", False), bool)
+
     def is_null(self) -> bool:
         return (
             self.valence == 0 and self.threat == 0 and self.novelty == 0

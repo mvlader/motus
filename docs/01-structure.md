@@ -54,7 +54,7 @@ MOTUS — слой мотивации и поведенческого управ
 
 | Слой | Модуль | Детерминирован | LLM |
 |---|---|---|---|
-| L-1 | `appraisal.py` | нет (`mode: model`, умолчание) | малая, выход по строгой схеме (`lexicon_l1.py` — отключённый словарный путь, docs/04) |
+| L-1 | `appraisal.py` | нет (`mode: model`, умолчание); **да** на отказе сенсора (`model_fallback: lexical`, docs/04) | малая, выход по строгой схеме |
 | L0 | `core.py`, `state.py`, `clock.py` | **да, полностью** | нет |
 | L1 | `gates.py` | **да, полностью** | нет |
 | L2 | `verbalizer.py` | **да, полностью** | нет |
@@ -270,7 +270,7 @@ motus/
 │   ├── 01-structure.md      ← этот файл
 │   ├── 02-terms.md          глоссарий
 │   ├── 03-formulas.md       вся математика
-│   └── 04-model-l1.md       L-1: модель по умолчанию, словарь отключён
+│   └── 04-model-l1.md       L-1: модель по умолчанию, словарь — бесплатный fallback
 ├── config/
 │   ├── default.json         драйвы, темперамент, пороги, бюджеты
 │   ├── lexicon.ru.json      фиксированный словарь для генератора карточки
@@ -284,7 +284,7 @@ motus/
 │   ├── gates.py             L1: режимы, гистерезис, capability mask
 │   ├── verbalizer.py        L2: карточка, без чисел
 │   ├── appraisal.py         L-1: правила событий + режимы оценки текста
-│   ├── lexicon_l1.py        L-1: словарь текст→Appraisal (ОТКЛЮЧЁН, референс/бенчмарк)
+│   ├── lexicon_l1.py        L-1: словарь текст→Appraisal (mode=lexical; fallback при mode=model)
 │   ├── repertoire.py        шаблоны задач, выбор, эффективность
 │   ├── budget.py            токен-бакет (token bucket), рефрактерность, штраф за молчание
 │   ├── journal.py           append-only jsonl

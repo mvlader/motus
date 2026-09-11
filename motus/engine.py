@@ -75,13 +75,12 @@ class Engine:
         self.rep = Repertoire(cfg, self.h)
         # Явно переданный sensor означает режим "model" (так строят тесты и
         # daemon при appraisal.mode=model); иначе — режим из конфига, по
-        # умолчанию "model" (словарная математика отключена — см. appraisal.py).
+        # умолчанию "model" (docs/04-model-l1.md).
         ap_cfg = cfg.get("appraisal", {})
         ap_mode = "model" if sensor is not None else ap_cfg.get("mode", "model")
-        # lexical_strict — параметр отключённого словарного пути, ни на что не
-        # влияет; передаётся дальше только чтобы не ломать старые конфиги/тесты.
         self.ap = Appraiser(sensor, mode=ap_mode,
-                            lexical_strict=bool(ap_cfg.get("lexical_strict", False)))
+                            lexical_strict=bool(ap_cfg.get("lexical_strict", False)),
+                            model_fallback=ap_cfg.get("model_fallback", "null"))
         self.state = st or State.initial(cfg, clock.now())
         self._last_regime = self.state.regime
         self._last_card = ""

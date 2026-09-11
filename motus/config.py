@@ -124,12 +124,13 @@ def validate(cfg: Dict[str, Any]) -> None:
 
     ap = cfg.get("appraisal", {})
     mode = ap.get("mode", "model")
-    # "lexical" убран из допустимых значений 2026-09-10: словарная математика
-    # L-1 отключена (appraisal.py) — один словарь на язык пользователю не подошёл.
-    if mode not in ("model", "off"):
-        raise ConfigError(f"appraisal.mode: ожидается model|off, получено {mode!r}")
+    if mode not in ("model", "lexical", "off"):
+        raise ConfigError(f"appraisal.mode: ожидается model|lexical|off, получено {mode!r}")
     if "lexical_strict" in ap and not isinstance(ap["lexical_strict"], bool):
         raise ConfigError("appraisal.lexical_strict: ожидается true|false")
+    fallback = ap.get("model_fallback", "null")
+    if fallback not in ("null", "lexical"):
+        raise ConfigError(f"appraisal.model_fallback: ожидается null|lexical, получено {fallback!r}")
     if mode == "model":
         api = ap.get("api", "llamacpp")
         if api not in ("llamacpp", "ollama"):

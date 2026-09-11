@@ -715,6 +715,85 @@ class TestAppraisal(unittest.TestCase):
         self.assertEqual((a.valence, a.threat, a.novelty), (-2, 2, 1))
         self.assertTrue(a.agency_blocked)
 
+    def test_is_well_formed_distinguishes_honest_neutral_from_garbage(self):
+        """parse() стирает разницу между 'модель честно сказала: нейтрально' и
+        'модель выдала мусор' — обе дают is_null()==True. is_well_formed()
+        обязана их различать, иначе fallback подменит честный ноль."""
+        honest_neutral = {"valence": 0, "threat": 0, "novelty": 0,
+                          "social_warmth": 0, "loss": 0, "agency_blocked": False}
+        self.assertTrue(Appraisal.is_well_formed(honest_neutral))
+        self.assertTrue(Appraisal.parse(honest_neutral).is_null())
+
+        for garbage in (None, "нет", {"valence": 9}, {"valence": "x"}, {"threat": -1}, 42,
+                       {"valence": 0, "agency_blocked": "yes"}):
+            self.assertFalse(Appraisal.is_well_formed(garbage), garbage)
+        # {} — не мусор: отсутствующие поля по тем же правилам, что и parse(),
+        # по умолчанию 0/False, это тот же «честный ноль», что и явные нули.
+        self.assertTrue(Appraisal.is_well_formed({}))
+
+    def test_appraiser_model_fallback_null_is_old_default_behaviour(self):
+        def broken(text):
+            raise TimeoutError("no route to host")
+
+        ap = appraisal_mod.Appraiser(sensor=broken)  # model_fallback умолчание "null"
+        a = ap.appraise_text("ты мне очень помог, спасибо огромное!")
+        self.assertTrue(a.is_null())
+        self.assertTrue(ap.last_failed)
+        self.assertEqual(ap.invalid_count, 1)
+
+    def test_appraiser_model_fallback_lexical_on_sensor_exception(self):
+        """ПК с ollama не всегда включён — сенсор кидает исключение (сеть,
+        таймаут). model_fallback='lexical' должен дать реальный сигнал, а не
+        тишину, и всё равно отметить отказ для журнала."""
+        def broken(text):
+            raise TimeoutError("no route to host")
+
+        ap = appraisal_mod.Appraiser(sensor=broken, model_fallback="lexical")
+        a = ap.appraise_text("ты мне очень помог, наконец-то всё заработало, спасибо!")
+        self.assertGreater(a.valence, 0)          # словарь реально сработал
+        self.assertGreater(a.social_warmth, 0)
+        self.assertTrue(ap.last_failed)            # отказ сенсора всё равно виден
+        self.assertEqual(ap.invalid_count, 1)
+
+    def test_appraiser_model_fallback_lexical_on_malformed_response(self):
+        ap = appraisal_mod.Appraiser(sensor=lambda t: {"valence": 99},
+                                     model_fallback="lexical")
+        a = ap.appraise_text("да сколько можно, ты опять всё испортил")
+        self.assertLess(a.valence, 0)               # словарь, не тишина
+        self.assertTrue(ap.last_failed)
+
+    def test_appraiser_model_fallback_lexical_does_not_override_honest_null(self):
+        """Модель ответила валидно и честно нейтрально — fallback НЕ должен
+        подменять это словарной оценкой того же текста, даже если словарь на
+        этом тексте что-то бы нашёл."""
+        def neutral(text):
+            return {"valence": 0, "threat": 0, "novelty": 0,
+                    "social_warmth": 0, "loss": 0, "agency_blocked": False}
+
+        ap = appraisal_mod.Appraiser(sensor=neutral, model_fallback="lexical")
+        a = ap.appraise_text("спасибо, ты мне очень помог!")  # словарь дал бы valence>0
+        self.assertTrue(a.is_null())
+        self.assertFalse(ap.last_failed)
+        self.assertEqual(ap.invalid_count, 0)
+
+    def test_appraiser_mode_lexical_still_selectable(self):
+        ap = appraisal_mod.Appraiser(mode="lexical")
+        a = ap.appraise_text("огромное спасибо, ты супер!")
+        self.assertGreater(a.valence, 0)
+
+    def test_engine_model_fallback_lexical_moves_state_on_sensor_failure(self):
+        cfg = cfg_full()
+        cfg["appraisal"] = {"mode": "model", "model_fallback": "lexical"}
+
+        def broken(text):
+            raise TimeoutError("stub")
+
+        eng = Engine(cfg, VirtualClock(T0), NullJournal(), sensor=broken)
+        eng.submit_event(Event("user_message", T0,
+                               {"text": "ты мне очень помог, наконец-то всё заработало, спасибо!"}))
+        # тёплое сообщение → словарь даёт social_warmth>0 → импульс CARE.
+        self.assertGreater(eng.state.drives["CARE"], cfg["drives"]["CARE"]["setpoint"])
+
 
 class TestConfig(unittest.TestCase):
     def test_hysteresis_required(self):
@@ -748,6 +827,22 @@ class TestConfig(unittest.TestCase):
         c["budget"]["initiation_enabled"] = "yes"
         with self.assertRaises(config.ConfigError):
             config.validate(c)
+
+    def test_appraisal_mode_lexical_accepted(self):
+        c = cfg_full()
+        c["appraisal"] = {"mode": "lexical"}
+        config.validate(c)  # не должно бросить
+
+    def test_appraisal_model_fallback_must_be_known_value(self):
+        c = cfg_full()
+        c["appraisal"] = {"mode": "model", "api": "ollama", "base_url": "http://x",
+                          "model": "m", "model_fallback": "cloud"}
+        with self.assertRaises(config.ConfigError):
+            config.validate(c)
+
+    def test_appraisal_model_fallback_default_is_lexical_in_shipped_config(self):
+        c = cfg_full()
+        self.assertEqual(c["appraisal"]["model_fallback"], "lexical")
 
     def test_rage_repertoire_rejected(self):
         c = cfg_full()

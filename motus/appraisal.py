@@ -4,20 +4,26 @@
   * правила (детерминированные) — датчики, таймеры, коды ошибок (Appraiser.impulses);
   * оценка текста сообщения — по `Appraiser.mode`:
       "model" (умолчание) — модель как СЕНСОР, выход строго по схеме Appraisal;
+      "lexical" — детерминированный словарь `lexicon_l1.py`, без сети;
       "off" — нули.
 
 Модель ничего не рассказывает про эмоции: заполняет шесть полей с известными
 диапазонами. Дрейфовать негде, невалидная схема падает в нули и логируется как
 appraisal_invalid — отказ сенсора не должен двигать состояние.
 
-БЫЛ третий режим — "lexical", детерминированный словарь `lexicon_l1.py`. Отключён
-2026-09-10 по требованию пользователя: словарь один на язык, поддерживать его
-руками под каждый следующий язык он не хочет. Модель этого не требует — оценивает
-любой язык тем же промптом. Обоснование выбора конкретной модели (gemma-4 E4B
-`ge4b-heretic` вместо прежнего Qwen3-1.7B) — docs/04-model-l1.md, живые цифры —
-`tools/bench_l1_live.py`. `lexicon_l1.py` не удалён (референс, офлайн-бенчмарк),
-но из этого модуля больше не импортируется:
-    # from .lexicon_l1 import lexical_appraise
+История словаря: отключался 2026-09-10 как основной путь — словарь один на язык,
+поддерживать его руками под каждый следующий пользователь не хочет, а модель (в
+конфиге — gemma-4 E4B `ge4b-heretic` на ПК по LAN через ollama) на живом
+сравнении точнее и безопаснее (docs/04-model-l1.md, `tools/bench_l1_live.py`).
+
+Тем же вечером вскрылась цена: ПК не всегда включён, а Pi не тянет модель такого
+уровня — без сети L-1 просто молчит (нули). Добавлен `appraisal.model_fallback`:
+при `"lexical"` отказ сенсора (сеть упала, таймаут, невалидная схема) откатывает
+на словарь вместо нулей — не потому что словарь снова основной путь, а потому что
+"честный сигнал по-русски, пока ПК не поднялся" лучше "тишины, пока ПК не
+поднялся", и это ничего не стоит: код и тесты никогда не удалялись, вызов
+локальный и бесплатный. `appraisal_invalid` в журнале всё равно пишется — видно,
+что сенсор был недоступен, даже если состояние всё же сдвинулось по словарю.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
 from .events import Appraisal, Event, Impulse
-# from .lexicon_l1 import lexical_appraise  # словарная математика отключена (см. выше)
+from .lexicon_l1 import lexical_appraise
 
 #: Промпт для режима "model" (по умолчанию L-1 работает без модели, см.
 #: lexicon_l1.py). Few-shot: без примеров Qwen3-0.6B/1.7B систематически заваливали
@@ -216,46 +222,51 @@ def ollama_sensor(cfg: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:
 class Appraiser:
     """Правила (события мира → импульсы) плюс оценка текста сообщения.
 
-    Текст оценивается одним из двух способов (`mode`):
+    Текст оценивается одним из трёх способов (`mode`):
       * "model" — малая модель через `sensor` (llama.cpp / ollama), **по умолчанию**.
-        Отказ модели → нули (docs/02-terms.md: «отказ сенсора не двигает
-        состояние»), и это пишется в журнал как appraisal_invalid.
+        Отказ модели → см. `model_fallback` ниже, и в любом случае пишется в
+        журнал как appraisal_invalid — отказ сенсора виден, даже если состояние
+        всё же сдвинулось запасным путём.
+      * "lexical" — детерминированный словарь (`motus/lexicon_l1.py`), без сети
+        и без задержки. Один язык (русский), но бесплатный и не зависит от
+        того, что где-то включено.
       * "off" — всегда нули, текст не оценивается вовсе.
 
-    ОТКЛЮЧЕНО (2026-09-10, по требованию пользователя): режим "lexical" —
-    детерминированный словарь `motus/lexicon_l1.py`. На русской выборке он был
-    точнее и безопаснее Qwen3-1.7B (docs/04-model-l1.md), но словарь один на
-    язык и держать его руками под каждый следующий язык пользователь не хочет.
-    Живое сравнение на той же выборке (`tools/bench_l1_live.py`, GOLD+HARD, 20
-    сообщений) с gemma-4 E4B (`ge4b-heretic` на ПК по LAN через ollama) дало
-    ±1 85% / вред 5% / false_alarm 0 — лучше и словаря (80%/15%), и прежнего
-    кандидата Qwen3-1.7B на Pi (55%/25%). Ветка словаря НЕ вызывается:
-        # if self.mode == "lexical":
-        #     return lexical_appraise(text, strict=self.lexical_strict)
-    Сам `lexicon_l1.py` и его тесты не удалены — референс и офлайн-инструмент
-    (`tools/bench_l1_model.py --lexical` для будущих сравнений), но из
-    боевого пути исключён. `lexical_strict` остаётся в конфиге как поле без
-    действия (dead config), пока словарный путь не понадобится снова.
+    `model_fallback` (используется только при `mode == "model"`):
+      * "null" (умолчание) — отказ сенсора не двигает состояние (docs/02-terms.md).
+      * "lexical" — отказ сенсора (сеть, таймаут, невалидная схема) откатывает на
+        словарь вместо нулей. Для ситуации «модель на удалённом ПК, который не
+        всегда включён, а платить за облако не хочется» — честный сигнал по
+        словарю лучше тишины, и это не возврат словаря в основной путь: пока
+        модель отвечает, используется она.
 
     Совместимость: `Appraiser(sensor=fn)` без явного mode → "model" (так строят
     тесты и старый код).
     """
 
     def __init__(self, sensor: Optional[Callable[[str], Any]] = None,
-                 mode: Optional[str] = None, lexical_strict: bool = False) -> None:
+                 mode: Optional[str] = None, lexical_strict: bool = False,
+                 model_fallback: str = "null") -> None:
         self.sensor = sensor
         self.mode = mode or "model"
         self.lexical_strict = lexical_strict
+        self.model_fallback = model_fallback
         self.invalid_count = 0
         self.last_failed = False
+
+    def _fallback(self, text: str) -> Appraisal:
+        """Что вернуть при отказе сенсора в mode='model'. Вызывающий уже
+        отметил invalid_count/last_failed — здесь только выбор значения."""
+        if self.model_fallback == "lexical":
+            return lexical_appraise(text, strict=self.lexical_strict)
+        return Appraisal()
 
     def appraise_text(self, text: str) -> Appraisal:
         self.last_failed = False
         if self.mode == "off":
             return Appraisal()
-        # словарная математика отключена — см. докстринг класса.
-        # if self.mode == "lexical":
-        #     return lexical_appraise(text, strict=self.lexical_strict)
+        if self.mode == "lexical":
+            return lexical_appraise(text, strict=self.lexical_strict)
         # mode == "model"
         if not self.sensor:
             return Appraisal()
@@ -264,18 +275,23 @@ class Appraiser:
         except Exception:
             self.invalid_count += 1
             self.last_failed = True
-            return Appraisal()
+            return self._fallback(text)
         if isinstance(raw, str):
             try:
                 raw = json.loads(raw)
             except ValueError:
                 self.invalid_count += 1
                 self.last_failed = True
-                return Appraisal()
+                return self._fallback(text)
+        # is_null() одинаков и для «модель ответила валидно и честно нейтрально»,
+        # и для «модель ответила мусором, parse() уронил в нули» — is_well_formed()
+        # смотрит на raw ДО того, как parse() эту разницу стёр. Настоящую
+        # нейтральную оценку подменять запасным путём нельзя.
         a = Appraisal.parse(raw)
-        if a.is_null() and raw:
+        if a.is_null() and raw and not Appraisal.is_well_formed(raw):
             self.invalid_count += 1
             self.last_failed = True
+            return self._fallback(text)
         return a
 
     # ------------------------------------------------------------- правила
