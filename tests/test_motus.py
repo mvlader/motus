@@ -42,6 +42,12 @@ _t1_spec = importlib.util.spec_from_file_location("tier1_executor", _t1_path)
 tier1_executor = importlib.util.module_from_spec(_t1_spec)
 _t1_spec.loader.exec_module(tier1_executor)
 
+_t2_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "deploy", "tier2_executor.py")
+_t2_spec = importlib.util.spec_from_file_location("tier2_executor", _t2_path)
+tier2_executor = importlib.util.module_from_spec(_t2_spec)
+_t2_spec.loader.exec_module(tier2_executor)
+
 T0 = 1767225600.0  # фиксированная точка отсчёта, чтобы тесты не зависели от «сегодня»
 
 
@@ -999,6 +1005,88 @@ class TestListenerSplit(unittest.TestCase):
         self.assertEqual(self._handle("/state/raw", public=False)["code"], 200)
         self.assertIn("activation", self._handle("/state/card", public=False)["obj"]["gate"])
 
+    def test_public_allows_initiate_pending(self):
+        self.assertEqual(self._handle("/initiate/pending", public=True)["code"], 200)
+
+
+class TestInitiatePending(unittest.TestCase):
+    """GET /initiate/pending (Tier 2): только чтение, с защитой от тишины
+    короче INITIATE_MIN_SILENCE_S."""
+
+    def _svc(self, tmp):
+        from motus.daemon import Service
+        return Service(cfg_full(), tmp)
+
+    def _get(self, svc, path="/initiate/pending"):
+        from motus.daemon import Handler
+        Handler.service = svc
+        h = Handler.__new__(Handler)
+        h.server = type("S", (), {"public": True})()
+        h.path = path
+        sent = {}
+        h._send = lambda code, obj: sent.update(code=code, obj=obj)
+        h.do_GET()
+        return sent["obj"]
+
+    def test_nothing_pending_by_default(self):
+        tmp = tempfile.mkdtemp(prefix="motus-ip-")
+        try:
+            svc = self._svc(tmp)
+            self.assertEqual(self._get(svc), {"pending": False})
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_pending_hidden_during_recent_contact(self):
+        """initiation_pending=True, но контакт был только что — не отдаём
+        pending: это тик, вызванный обычным /state/card посреди разговора,
+        не настоящая проактивная инициация в тишину."""
+        tmp = tempfile.mkdtemp(prefix="motus-ip-")
+        try:
+            from motus import daemon as daemon_mod
+            svc = self._svc(tmp)
+            st = svc.engine.state
+            st.initiation_pending = True
+            st.last_contact_t = svc.clock.now() - (daemon_mod.INITIATE_MIN_SILENCE_S / 2)
+            self.assertEqual(self._get(svc), {"pending": False})
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_pending_true_after_real_silence(self):
+        tmp = tempfile.mkdtemp(prefix="motus-ip-")
+        try:
+            from motus import daemon as daemon_mod
+            svc = self._svc(tmp)
+            st = svc.engine.state
+            st.initiation_pending = True
+            st.regime = "PANIC"
+            st.last_contact_t = svc.clock.now() - (daemon_mod.INITIATE_MIN_SILENCE_S * 3)
+            out = self._get(svc)
+            self.assertTrue(out["pending"])
+            self.assertIn("card", out)
+            self.assertIn("text", out["card"])
+            self.assertEqual(out["gate"]["regime"], "PANIC")
+            self.assertIn("max_tokens", out["gate"])
+            self.assertIn("forbidden", out["gate"])
+            self.assertNotIn("activation", out["gate"])  # число — не наружу
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_readonly_does_not_advance_or_spend(self):
+        """/initiate/pending не должен тикать и не должен трогать бюджет —
+        повторные опросы не должны сами по себе ничего списывать."""
+        tmp = tempfile.mkdtemp(prefix="motus-ip-")
+        try:
+            svc = self._svc(tmp)
+            st = svc.engine.state
+            tokens_before = st.tokens
+            t_before = st.t
+            for _ in range(5):
+                self._get(svc)
+            self.assertEqual(st.tokens, tokens_before)
+            self.assertEqual(st.t, t_before)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 class TestNonFiniteHardening(unittest.TestCase):
     def test_state_from_dict_rejects_nan_snapshot(self):
@@ -1173,6 +1261,102 @@ class TestTier1Executor(unittest.TestCase):
             self.assertFalse(cons["verified"])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestTier2Executor(unittest.TestCase):
+    """Исполнитель доставки проактива: deploy/tier2_executor.py."""
+
+    def _args(self, tmp, session_key="agent:main:telegram:direct:1"):
+        return argparse.Namespace(
+            motusd="http://x", state_dir=pathlib.Path(tmp), openclaw="/bin/false",
+            session_key=session_key, to=None, channel=None, timeout=5, dry_run=False,
+        )
+
+    def test_nothing_pending_is_noop(self):
+        tmp = tempfile.mkdtemp(prefix="motus-t2-")
+        try:
+            with unittest.mock.patch.object(tier2_executor, "_get",
+                                            return_value={"pending": False}):
+                with unittest.mock.patch.object(tier2_executor, "run_openclaw") as ro:
+                    with unittest.mock.patch.object(tier2_executor, "_post") as po:
+                        rc = tier2_executor._run(self._args(tmp))
+            self.assertEqual(rc, 0)
+            ro.assert_not_called()
+            po.assert_not_called()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_main_refuses_without_recipient(self):
+        rc = tier2_executor.main(["--motusd", "http://x"])
+        self.assertEqual(rc, 2)
+
+    def test_main_dry_run_allows_missing_recipient(self):
+        tmp = tempfile.mkdtemp(prefix="motus-t2-")
+        try:
+            with unittest.mock.patch.object(tier2_executor, "_get",
+                                            return_value={"pending": False}):
+                rc = tier2_executor.main(["--motusd", "http://x", "--state-dir", tmp,
+                                          "--dry-run"])
+            self.assertEqual(rc, 0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_build_command_prefers_session_key_over_to(self):
+        cmd = tier2_executor.build_command("/bin/openclaw", "agent:main:x", "+1555",
+                                           "telegram", pathlib.Path("/tmp/p.txt"), 60)
+        self.assertIn("--session-key", cmd)
+        self.assertNotIn("--to", cmd)
+        cmd2 = tier2_executor.build_command("/bin/openclaw", None, "+1555",
+                                            "telegram", pathlib.Path("/tmp/p.txt"), 60)
+        self.assertIn("--to", cmd2)
+        self.assertIn("--channel", cmd2)
+
+    def test_delivered_ok_does_not_refund(self):
+        tmp = tempfile.mkdtemp(prefix="motus-t2-")
+        try:
+            posted = []
+            with unittest.mock.patch.object(
+                    tier2_executor, "_get",
+                    return_value={"pending": True, "card": {"text": "не хватает контакта"},
+                                 "gate": {"regime": "PANIC"}}):
+                with unittest.mock.patch.object(tier2_executor, "run_openclaw",
+                                                return_value=(True, {"ok": True})):
+                    with unittest.mock.patch.object(
+                            tier2_executor, "_post",
+                            side_effect=lambda url, body, **k: posted.append(url) or {}):
+                        rc = tier2_executor._run(self._args(tmp))
+            self.assertEqual(rc, 0)
+            self.assertEqual(posted, [])  # /refund НЕ вызван
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_channel_failure_triggers_refund(self):
+        tmp = tempfile.mkdtemp(prefix="motus-t2-")
+        try:
+            posted = []
+            with unittest.mock.patch.object(
+                    tier2_executor, "_get",
+                    return_value={"pending": True, "card": {"text": "не хватает контакта"},
+                                 "gate": {"regime": "PANIC"}}):
+                with unittest.mock.patch.object(
+                        tier2_executor, "run_openclaw",
+                        return_value=(False, {"error": "channel down"})):
+                    with unittest.mock.patch.object(
+                            tier2_executor, "_post",
+                            side_effect=lambda url, body, **k: posted.append(url) or {}):
+                        rc = tier2_executor._run(self._args(tmp))
+            self.assertEqual(rc, 1)
+            self.assertEqual(len(posted), 1)
+            self.assertTrue(posted[0].endswith("/refund"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_prompt_never_sends_card_text_verbatim_as_command(self):
+        """Скрипт не должен указывать модели ЧТО именно написать словом в
+        слово — только контекст и разрешение написать что-то уместное."""
+        p = tier2_executor.PROMPT_TEMPLATE.format(card_text="не хватает контакта")
+        self.assertIn("не хватает контакта", p)
+        self.assertIn("можешь сейчас написать первой", p)
 
 
 if __name__ == "__main__":

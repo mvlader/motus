@@ -40,8 +40,18 @@ DEFAULT_PORT = 18790  # у openclaw gateway 18789 — не конфликтуе�
 #: Что видит openclaw. Всё остальное — только на админ-сокете.
 PUBLIC_PATHS = frozenset((
     "/health", "/state/card", "/event", "/task/next", "/consummation",
-    "/refund", "/llm_call",
+    "/refund", "/llm_call", "/initiate/pending",
 ))
+
+#: Tier 2: не отдавать "pending", если тишина короче этого порога — даже если
+#: движок уже решил "initiate" внутри тика, вызванного ОБЫЧНЫМ /state/card
+#: посреди живого разговора (плагин дёргает его на каждый ход). Настоящая
+#: проактивная инициация — это когда пользователя не было какое-то время, а
+#: не артефакт того, что кто-то просто спросил карточку. Исполнитель Tier 2
+#: опрашивает этот путь по таймеру, не по каждому ходу, так что отдельная
+#: живая инициация внутри разговора (если когда-нибудь понадобится) должна
+#: идти другим путём — не через этот эндпоинт.
+INITIATE_MIN_SILENCE_S = 300.0
 
 
 class Service:
@@ -199,6 +209,25 @@ class Handler(BaseHTTPRequestHandler):
                 d = svc.engine.tick()
                 return self._send(200, {"task": d.task.to_dict() if d.task else None,
                                         "tier": d.tier})
+        if path == "/initiate/pending":
+            # Tier 2: только чтение, ничего не тикает и не спишет — движок уже
+            # решил (или нет) внутри обычного тика; здесь лишь докладываем.
+            with svc.lock:
+                st = svc.engine.state
+                if not st.initiation_pending:
+                    return self._send(200, {"pending": False})
+                silence_s = svc.clock.now() - st.last_contact_t
+                if silence_s < INITIATE_MIN_SILENCE_S:
+                    # Инициация решена внутри тика, вызванного живым ходом
+                    # (например, /state/card из before_prompt_build) — не
+                    # выдаём её как повод писать поверх активного разговора.
+                    return self._send(200, {"pending": False})
+                gate = svc.engine.gk.evaluate(st)
+                card = svc.engine.vb.render(st, gate)
+                return self._send(200, {"pending": True, "card": card.to_dict(),
+                                        "gate": {"regime": gate.regime,
+                                                 "max_tokens": gate.max_tokens,
+                                                 "forbidden": list(gate.forbidden)}})
         if path == "/journal/tail":
             n = int(query.get("n", 50))
             return self._send(200, {"records": svc.journal.tail(min(n, 500))})

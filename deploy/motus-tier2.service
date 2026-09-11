@@ -1,0 +1,29 @@
+# Tier 2 — доставка проактивных сообщений MOTUS. Ставится ВНУТРИ grach, от
+# пользователя openclaw. Опрашивает /initiate/pending (публичный API MOTUS,
+# 127.0.0.1:18790) и, если движок решил инициировать контакт, просит openclaw
+# сделать один ход через реальный гейтвей с --deliver.
+# Код: одиночный stdlib-файл /opt/motus-tier2/tier2_executor.py.
+#
+# ТРЕБУЕТ MOTUS_TIER2_SESSION_KEY (или MOTUS_TIER2_TO) — без получателя
+# исполнитель отказывается стартовать (exit 2). Прописать перед enable.
+[Unit]
+Description=MOTUS — доставка проактивных сообщений (Tier 2)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=openclaw
+StateDirectory=motus-tier2
+Environment=MOTUS_TIER2_STATE=%S/motus-tier2
+Environment=MOTUS_TIER2_MOTUSD=http://127.0.0.1:18790
+Environment=MOTUS_TIER2_OPENCLAW=/home/openclaw/.npm-global/bin/openclaw
+# ЗАПОЛНИТЬ перед enable, например через systemctl edit --stash или
+# /etc/systemd/system/motus-tier2.service.d/override.conf:
+Environment=MOTUS_TIER2_SESSION_KEY=
+Environment=MOTUS_TIER2_TIMEOUT=180
+ExecStart=/usr/bin/python3 /opt/motus-tier2/tier2_executor.py
+Nice=10
+CPUWeight=40
+NoNewPrivileges=yes
+TimeoutStartSec=300
+# [Install] нет намеренно: сервис запускает только таймер (motus-tier2.timer).

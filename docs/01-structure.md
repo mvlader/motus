@@ -135,8 +135,9 @@ LUST исключён: у бота нет референта. Оставлять
 |---|---|:---:|---|
 | `GET` | `/state/card` | ✓ | карточка (текст, без чисел) + capability mask |
 | `POST` | `/event` | ✓ | событие (сообщение, датчик, ошибка инструмента, сеть) |
-| `GET` | `/task/next` | ✓ | задача из репертуара доминирующего драйва |
+| `GET` | `/task/next` | ✓ | задача из репертуара доминирующего драйва (Tier 1) |
 | `POST` | `/consummation` | ✓ | засчитать выполнение задачи (проверяемый факт) |
+| `GET` | `/initiate/pending` | ✓ | есть ли решённая проактивная инициация к доставке (Tier 2), только после `INITIATE_MIN_SILENCE_S` тишины |
 | `POST` | `/refund` | ✓ | вернуть токен, если инициация не состоялась |
 | `POST` | `/llm_call` | ✓ | зарегистрировать вызов модели |
 | `GET` | `/health` | ✓ | жив ли, версия, seq |
@@ -294,13 +295,18 @@ motus/
 │   ├── DEPLOY.md            развёртывание: контейнер motus + проброс в grach
 │   ├── motusd.service       юнит демона (в контейнере motus)
 │   ├── openclaw-hook.md     контракт эндпоинтов
-│   ├── openclaw-plugin/     плагин openclaw ↔ MOTUS
+│   ├── openclaw-plugin/     плагин openclaw ↔ MOTUS (before_prompt_build, message_sending)
 │   ├── somatic_probe.py     датчик железа Pi (в grach)
 │   ├── motus-somatic.{service,timer}
-│   └── llama-l1.service     llama-server для опц. режима model
+│   ├── tier1_executor.py    Tier 1: задача → openclaw agent exec (изолированно) → /consummation
+│   ├── motus-tier1.{service,timer}
+│   ├── tier2_executor.py    Tier 2: /initiate/pending → openclaw agent --deliver
+│   ├── motus-tier2.{service,timer}
+│   └── llama-l1.service     llama-server для локального режима model (альтернатива ollama на ПК)
 ├── tools/
 │   ├── simulate.py          прогон суток за миллисекунды по графикам
-│   └── bench_l1_model.py    L-1: словарь vs модель, метрика вреда
+│   ├── bench_l1_model.py    L-1: сравнение кандидатов на CPU Pi (свои llama-server)
+│   └── bench_l1_live.py     L-1: то же для уже поднятых серверов, + ollama по LAN
 ├── tests/                   stdlib unittest, без внешних зависимостей
 └── var/                     снапшоты и журналы (не в VCS)
 ```

@@ -30,6 +30,7 @@ MOTUS живёт в **отдельном контейнере `motus`**, изо�
 | админ API | `/run/motusd/adm.sock` (600, motus) — только внутри контейнера `motus` |
 | датчик железа | `deploy/motus-somatic.{service,timer}` внутри `grach`, `User=motus-probe`, код `/opt/motus-probe/somatic_probe.py` |
 | исполнитель задач (Tier 1) | `deploy/motus-tier1.{service,timer}` внутри `grach`, `User=openclaw`, код `/opt/motus-tier1/tier1_executor.py`; дёргает `GET /task/next` → `openclaw agent exec --isolated` → `POST /consummation` |
+| доставка проактива (Tier 2) | `deploy/motus-tier2.{service,timer}` внутри `grach`, `User=openclaw`, код `/opt/motus-tier2/tier2_executor.py`; дёргает `GET /initiate/pending` → `openclaw agent --deliver` → (при сбое) `POST /refund`. Требует `MOTUS_TIER2_SESSION_KEY`/`MOTUS_TIER2_TO` — без получателя не стартует |
 
 ## Развернуть с нуля
 
@@ -90,6 +91,26 @@ incus exec grach -- systemctl enable --now motus-tier1.timer
 — поднять интервал таймера или указать лёгкую локальную модель через
 `MOTUS_TIER1_MODEL`.
 
+# 9. доставка проактивных сообщений Tier 2 (в grach, от пользователя openclaw)
+incus exec grach -- mkdir -p /opt/motus-tier2
+incus file push deploy/tier2_executor.py grach/opt/motus-tier2/tier2_executor.py
+incus exec grach -- chmod -R a+rX /opt/motus-tier2
+incus file push deploy/motus-tier2.service grach/etc/systemd/system/
+incus file push deploy/motus-tier2.timer   grach/etc/systemd/system/
+# ОБЯЗАТЕЛЬНО указать получателя — без него исполнитель откажется стартовать:
+incus exec grach -- mkdir -p /etc/systemd/system/motus-tier2.service.d
+incus exec grach -- sh -c 'cat > /etc/systemd/system/motus-tier2.service.d/override.conf <<EOF
+[Service]
+Environment=MOTUS_TIER2_SESSION_KEY=agent:main:telegram:direct:<id>
+EOF'
+incus exec grach -- systemctl daemon-reload
+# первый прогон — вручную, --dry-run печатает промпт и НЕ отправляет:
+incus exec grach -- sudo -u openclaw MOTUS_TIER2_STATE=/tmp/t2 MOTUS_TIER2_SESSION_KEY=agent:main:telegram:direct:<id> \
+  python3 /opt/motus-tier2/tier2_executor.py --dry-run
+# И только когда готов реально получать проактивные сообщения:
+# budget.initiation_enabled: true в config/default.json (сейчас false) + рестарт motusd
+incus exec grach -- systemctl enable --now motus-tier2.timer
+
 ## Обновить код
 
 ```bash
@@ -111,6 +132,9 @@ incus exec motus -- curl -s --unix-socket /run/motusd/adm.sock -XPOST http://x/s
 # Tier 1: что делал исполнитель
 incus exec grach -- journalctl -u motus-tier1.service --since today
 incus exec grach -- ls -lt /var/lib/motus-tier1/drops/     # результаты фоновых задач
+
+# Tier 2: доставлялись ли проактивные сообщения
+incus exec grach -- journalctl -u motus-tier2.service --since today
 ```
 
 ## L-1: модель, а не словарь (`appraisal.mode: model`, умолчание с 2026-09-10)

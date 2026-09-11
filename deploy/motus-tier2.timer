@@ -1,0 +1,13 @@
+# Раз в 10 минут проверяем /initiate/pending. Реальная частота инициаций всё
+# равно ограничена бюджетом MOTUS (refractory_s=1200, capacity=3/час) — этот
+# таймер только опрашивает, решение принимает ядро.
+[Unit]
+Description=MOTUS — проверка проактивных сообщений каждые 10 минут
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
