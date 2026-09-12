@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -25,6 +26,11 @@ class Journal:
         os.makedirs(self.dir, exist_ok=True)
         self._seq_path = os.path.join(self.dir, "seq")
         self._seq = self._read_seq()
+        # write() зовётся и из-под общего svc.lock демона, и (для appraisal_invalid)
+        # из вызова модели, который теперь намеренно идёт ВНЕ svc.lock (см.
+        # daemon.py /event) — без этого лока инкремент self._seq гонится между
+        # потоками и портит порядок/уникальность seq, на которых держится реплей.
+        self._lock = threading.Lock()
 
     def _read_seq(self) -> int:
         try:
@@ -46,6 +52,16 @@ class Journal:
     ) -> int:
         if kind not in KINDS:
             raise ValueError(f"неизвестный вид записи журнала: {kind}")
+        with self._lock:
+            return self._write_locked(kind, t, payload, snapshot)
+
+    def _write_locked(
+        self,
+        kind: str,
+        t: float,
+        payload: Optional[Dict[str, Any]],
+        snapshot: Optional[Dict[str, Any]],
+    ) -> int:
         self._seq += 1
         rec = {
             "seq": self._seq,

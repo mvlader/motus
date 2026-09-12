@@ -97,6 +97,30 @@ class Engine:
 
     # ---------------------------------------------------------------- события
 
+    def appraise_text_now(self, text: str, t: Optional[float] = None) -> Dict[str, Any]:
+        """Оценить текст сообщения (L-1) и вернуть готовый appraisal-словарь.
+
+        Не трогает State — вызывающий код (daemon.py) намеренно зовёт это ВНЕ
+        общего лока: при appraisal.mode=model это сетевой вызов (ollama/llama.cpp),
+        секунды на тёплом старте и до ~50с на холодном (docs/04-model-l1.md).
+        Раньше этот вызов сидел внутри submit_event() под общим локом демона —
+        /state/card и другие эндпоинты ждали его всю дорогу и сами упирались в
+        клиентский timeout плагина, из-за чего оба получали BrokenPipeError
+        (сервер отвечал уже в закрытый клиентом сокет).
+        """
+        a = self.ap.appraise_text(text)
+        # appraisal_invalid — только когда режим "model" и модель РЕАЛЬНО
+        # отказала (таймаут, битый JSON, пустой ответ на непустой текст).
+        # Штатный ноль от словаря или от mode=off сбоем не считается.
+        if self.ap.last_failed and text.strip():
+            self.journal.write("appraisal_invalid", t if t is not None else self.state.t,
+                               {"chars": len(text)})
+        return {
+            "valence": a.valence, "threat": a.threat, "novelty": a.novelty,
+            "social_warmth": a.social_warmth, "loss": a.loss,
+            "agency_blocked": a.agency_blocked,
+        }
+
     def submit_event(self, ev: Event) -> List[Impulse]:
         """Событие мира → импульсы → состояние. Время события двигает часы вперёд."""
         if ev.t < self.state.t:
@@ -104,30 +128,19 @@ class Engine:
         self.h.advance(self.state, ev.t)
 
         if ev.kind == "user_message" and "text" in ev.payload:
-            # Сырой текст пользователя оценивает L-1 (появился в этой сессии —
-            # см. docs/04-model-l1.md) и БЕЗУСЛОВНО выбрасывается: в журнал уходит
-            # только производный результат (6 маленьких чисел), не содержание
-            # сообщения. Безусловно — то есть даже если вызывающий по ошибке
-            # прислал text вместе с уже готовым appraisal: правило «текст не
-            # покидает ядро» не должно иметь обходного пути через чужую ошибку.
-            # Тот же принцип, что «вывод карточки не попадает в память как
-            # текст» — числа наружу, текст остаётся снаружи ядра. Побочный
-            # эффект — реплей остаётся детерминированным и офлайновым: он
-            # читает уже посчитанный appraisal из журнала и никогда не
+            # Сырой текст пользователя оценивает L-1 и БЕЗУСЛОВНО выбрасывается:
+            # в журнал уходит только производный результат (6 маленьких чисел),
+            # не содержание сообщения. Безусловно — то есть даже если вызывающий
+            # по ошибке прислал text вместе с уже готовым appraisal: правило
+            # «текст не покидает ядро» не должно иметь обходного пути через
+            # чужую ошибку. Тот же принцип, что «вывод карточки не попадает в
+            # память как текст» — числа наружу, текст остаётся снаружи ядра.
+            # Побочный эффект — реплей остаётся детерминированным и офлайновым:
+            # он читает уже посчитанный appraisal из журнала и никогда не
             # вызывает сеть повторно.
             text = ev.payload.pop("text")
             if "appraisal" not in ev.payload:
-                a = self.ap.appraise_text(text)
-                # appraisal_invalid — только когда режим "model" и модель РЕАЛЬНО
-                # отказала (таймаут, битый JSON, пустой ответ на непустой текст).
-                # Штатный ноль от словаря или от mode=off сбоем не считается.
-                if self.ap.last_failed and text.strip():
-                    self.journal.write("appraisal_invalid", ev.t, {"chars": len(text)})
-                ev.payload["appraisal"] = {
-                    "valence": a.valence, "threat": a.threat, "novelty": a.novelty,
-                    "social_warmth": a.social_warmth, "loss": a.loss,
-                    "agency_blocked": a.agency_blocked,
-                }
+                ev.payload["appraisal"] = self.appraise_text_now(text, ev.t)
 
         self.journal.write("event", ev.t, ev.to_dict())
 

@@ -1393,6 +1393,88 @@ class TestListenerSplit(unittest.TestCase):
         self.assertEqual(self._handle("/initiate/pending", public=True)["code"], 200)
 
 
+class TestEventDoesNotBlockCard(unittest.TestCase):
+    """/event с медленной оценкой текста (L-1 по сети) не должен держать
+    svc.lock всё это время — иначе /state/card (и всё остальное) ждёт вместе
+    с ним, упирается в клиентский timeout и получает BrokenPipeError, пока
+    сервер ещё сидит в сетевом вызове. Баг найден на живом деплое 2026-09-12."""
+
+    def _post_event(self, svc, text):
+        from motus.daemon import Handler
+        Handler.service = svc
+        h = Handler.__new__(Handler)
+        h.server = type("S", (), {"public": False})()
+        h.path = "/event"
+        h._body = lambda: {"kind": "user_message", "payload": {"text": text}}
+        sent = {}
+        h._send = lambda code, obj: sent.update(code=code, obj=obj)
+        h.do_POST()
+        return sent
+
+    def _get_card(self, svc):
+        from motus.daemon import Handler
+        Handler.service = svc
+        h = Handler.__new__(Handler)
+        h.server = type("S", (), {"public": False})()
+        h.path = "/state/card"
+        sent = {}
+        h._send = lambda code, obj: sent.update(code=code, obj=obj)
+        h.do_GET()
+        return sent
+
+    def test_state_card_not_blocked_by_slow_appraisal(self):
+        from motus.appraisal import Appraiser
+        from motus.daemon import Service
+        tmp = tempfile.mkdtemp(prefix="motus-noblock-")
+        try:
+            svc = Service(cfg_full(), tmp)
+
+            def slow_sensor(_text):
+                time.sleep(0.3)
+                return {"valence": 0, "threat": 0, "novelty": 0,
+                       "social_warmth": 0, "loss": 0, "agency_blocked": 0}
+
+            svc.engine.ap = Appraiser(sensor=slow_sensor, mode="model")
+
+            th = threading.Thread(target=self._post_event, args=(svc, "привет"))
+            th.start()
+            time.sleep(0.05)  # дать /event зайти в сенсор и не держать svc.lock
+            t0 = time.monotonic()
+            out = self._get_card(svc)
+            elapsed = time.monotonic() - t0
+            th.join(timeout=2)
+
+            self.assertEqual(out["code"], 200)
+            self.assertLess(elapsed, 0.2,
+                            "/state/card ждал наравне с медленным /event — лок не разделён")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_slow_appraisal_still_applies_and_journals_on_failure(self):
+        """Оценка текста вне лока — не значит «мимо журнала»: appraisal_invalid
+        при реальном отказе модели по-прежнему пишется, seq не портится."""
+        from motus.appraisal import Appraiser
+        from motus.daemon import Service
+        tmp = tempfile.mkdtemp(prefix="motus-noblock2-")
+        try:
+            svc = Service(cfg_full(), tmp)
+
+            def failing_sensor(_text):
+                raise TimeoutError("боевой сенсор недоступен")
+
+            svc.engine.ap = Appraiser(sensor=failing_sensor, mode="model")
+            out = self._post_event(svc, "текст, который не должен попасть в журнал")
+            self.assertEqual(out["code"], 200)
+
+            kinds = [r["kind"] for r in svc.journal.read_all()]
+            self.assertIn("appraisal_invalid", kinds)
+            self.assertIn("event", kinds)
+            seqs = [r["seq"] for r in svc.journal.read_all()]
+            self.assertEqual(len(seqs), len(set(seqs)), "seq не должны дублироваться")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestTaskNextReadsQueue(unittest.TestCase):
     """GET /task/next раньше вызывал engine.tick() и возвращал только то, что
     РЕШИЛОСЬ ИМЕННО В ЭТОТ ТИК — а задачи чаще кладёт в очередь независимый

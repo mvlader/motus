@@ -64,6 +64,11 @@ class Service:
         self.journal = Journal(os.path.join(var_dir, "journal"))
         self.clock = Clock()
         self.lock = threading.Lock()
+        # Отдельный лок для оценки текста (L-1): сама она идёт ВНЕ self.lock
+        # (см. /event), но модельный сенсор — один на процесс, параллельные
+        # вызовы к нему были бы гонкой за ap.last_failed и лишней нагрузкой на
+        # тот же локальный/LAN-инстанс модели.
+        self.appraise_lock = threading.Lock()
         st = self._load_state()
         sensor = None
         if cfg.get("appraisal", {}).get("mode") == "model":
@@ -349,9 +354,20 @@ class Handler(BaseHTTPRequestHandler):
             kind = body.get("kind")
             if not kind:
                 return self._send(400, {"error": "нужно поле kind"})
+            payload = dict(body.get("payload", {}))
+            if kind == "user_message" and "text" in payload and "appraisal" not in payload:
+                # Сетевой вызов модели (L-1) — вне svc.lock и вне времени, за
+                # которое клиент (плагин openclaw) готов ждать: иначе он на
+                # каждом ходе блокирует /state/card и другие эндпоинты на всё
+                # то же время, что уходит на инференс (docs/04-model-l1.md,
+                # «Латентность»). appraise_lock только сериализует сами вызовы
+                # к модели между собой — общего состояния не трогает.
+                text = payload.pop("text")
+                with svc.appraise_lock:
+                    payload["appraisal"] = svc.engine.appraise_text_now(text)
             with svc.lock:
                 imps = svc.engine.submit_event(
-                    Event(kind=kind, t=svc.clock.now(), payload=body.get("payload", {}))
+                    Event(kind=kind, t=svc.clock.now(), payload=payload)
                 )
                 svc.save_state()
             return self._send(200, {"applied": [i.to_dict() for i in imps]})
