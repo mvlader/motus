@@ -183,6 +183,19 @@ class Repertoire:
                 st.habituation[k] = st.habituation.get(k, 0.0) + self.EXPIRY_PENALTY
         return len(expired)
 
+    def peek(self, t: float, st: Optional[State] = None) -> Optional[Task]:
+        """Отдать самую раннюю ещё не выданную задачу из очереди, НЕ убирая её.
+
+        select() кладёт задачи в очередь на тиках фонового цикла, идущего
+        независимо от опросов исполнителя (Tier 1). Без peek() исполнитель
+        видел только то, что select() решит выдать в момент ЕГО опроса, а
+        реально положенные фоновым тиком задачи никто не читал — они просто
+        протухали по TTL. Удаление из очереди — по template_id, при
+        /consummation (см. pop()), не здесь.
+        """
+        self.expire(t, st)
+        return self.queue[0] if self.queue else None
+
     def pop(self, template_id: str) -> Optional[Task]:
         for i, q in enumerate(self.queue):
             if q.template_id == template_id:

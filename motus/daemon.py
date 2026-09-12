@@ -304,7 +304,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/task/next":
             with svc.lock:
                 d = svc.engine.tick()
-                return self._send(200, {"task": d.task.to_dict() if d.task else None,
+                svc.next_tick_s = d.next_tick_s
+                # d.task — то, что решилось именно в этом тике; но задачи чаще
+                # кладёт в очередь независимый фоновый цикл (run_ticker) между
+                # опросами исполнителя. peek() отдаёт то, что уже лежит там и
+                # ждёт (см. repertoire.Repertoire.peek).
+                task = d.task or svc.engine.rep.peek(svc.engine.state.t, svc.engine.state)
+                return self._send(200, {"task": task.to_dict() if task else None,
                                         "tier": d.tier})
         if path == "/initiate/pending":
             # Tier 2: только чтение, ничего не тикает и не спишет — движок уже

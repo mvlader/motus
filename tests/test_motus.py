@@ -410,11 +410,13 @@ class TestBehaviour(unittest.TestCase):
             eng.tick(ck.now())
         self.assertGreater(eng.state.act_penalty, 0.0)
 
-    def test_initiation_disabled_by_default_no_phantom_penalty(self):
-        """default.json: проактив выключен. 72 ч тишины → ни одной инициации и
-        ноль act_penalty: движок не наказывает себя за неотправленные сообщения."""
+    def test_initiation_disabled_no_phantom_penalty(self):
+        """При initiation_enabled=false: 72 ч тишины → ни одной инициации и
+        ноль act_penalty: движок не наказывает себя за неотправленные сообщения.
+        (initiation_enabled — осознанный выбор оператора, не константа; здесь
+        тестируется сам механизм выключения, а не то, что стоит по умолчанию.)"""
         cfg = cfg_full()
-        self.assertFalse(cfg["budget"].get("initiation_enabled", True))
+        cfg["budget"]["initiation_enabled"] = False
         ck = VirtualClock(T0)
         eng = Engine(cfg, ck, NullJournal())
         tier2 = 0
@@ -1389,6 +1391,70 @@ class TestListenerSplit(unittest.TestCase):
 
     def test_public_allows_initiate_pending(self):
         self.assertEqual(self._handle("/initiate/pending", public=True)["code"], 200)
+
+
+class TestTaskNextReadsQueue(unittest.TestCase):
+    """GET /task/next раньше вызывал engine.tick() и возвращал только то, что
+    РЕШИЛОСЬ ИМЕННО В ЭТОТ ТИК — а задачи чаще кладёт в очередь независимый
+    фоновый цикл (run_ticker) между опросами исполнителя (Tier 1), и они там
+    просто протухали по TTL, ни разу не будучи прочитаны. Регрессия на баг,
+    найденный на живом деплое 2026-09-12."""
+
+    def _get_task_next(self, svc):
+        from motus.daemon import Handler
+        Handler.service = svc
+        h = Handler.__new__(Handler)
+        h.server = type("S", (), {"public": False})()
+        h.path = "/task/next"
+        sent = {}
+        h._send = lambda code, obj: sent.update(code=code, obj=obj)
+        h.do_GET()
+        return sent["obj"]
+
+    def test_returns_task_queued_by_a_previous_tick(self):
+        from motus.daemon import Service
+        from motus.repertoire import Task
+        tmp = tempfile.mkdtemp(prefix="motus-tnext-")
+        try:
+            svc = Service(cfg_full(), tmp)
+            st = svc.engine.state
+            # Симулируем то, что реально происходило: фоновый тик уже положил
+            # задачу в очередь и включил рефрактерность — сам он новую не
+            # выдаст, пока не пройдёт task_min_interval_s.
+            queued = Task(
+                template_id="follow_curiosity", drive="SEEKING", prompt="p",
+                cost_tier="local", max_tokens=600, consummation={"type": "reflection"},
+                allowed_tools=("read", "memory"), issued_t=st.t,
+                expires_t=st.t + 3600.0, drive_at_issue=0.6,
+            )
+            svc.engine.rep.queue.append(queued)
+            st.last_task_t = st.t  # рефрактерность только что включилась
+
+            out = self._get_task_next(svc)
+            self.assertIsNotNone(out["task"], "задача из очереди должна была вернуться")
+            self.assertEqual(out["task"]["template_id"], "follow_curiosity")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_does_not_hand_out_expired_queued_task(self):
+        from motus.daemon import Service
+        from motus.repertoire import Task
+        tmp = tempfile.mkdtemp(prefix="motus-tnext-")
+        try:
+            svc = Service(cfg_full(), tmp)
+            st = svc.engine.state
+            expired = Task(
+                template_id="follow_curiosity", drive="SEEKING", prompt="p",
+                cost_tier="local", max_tokens=600, consummation={"type": "reflection"},
+                allowed_tools=("read", "memory"), issued_t=st.t - 7200.0,
+                expires_t=st.t - 3600.0, drive_at_issue=0.6,
+            )
+            svc.engine.rep.queue.append(expired)
+
+            out = self._get_task_next(svc)
+            self.assertIsNone(out["task"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestInitiatePending(unittest.TestCase):
