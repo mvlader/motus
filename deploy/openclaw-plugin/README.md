@@ -23,9 +23,19 @@ openclaw подключается к MOTUS **плагином** (не ручны
 в карточке: директиву модель может не заметить, а `message_sending` — последняя
 точка перед реальной отправкой.
 
-MOTUS не ответил за `timeoutMs` (2 с) → ход идёт без карточки / отправка не
+MOTUS не ответил за `timeoutMs` → ход идёт без карточки / отправка не
 блокируется (fail open — молчание MOTUS не должно ронять доставку). Плагин видит
 только публичный API — ни чисел состояния, ни журнала.
+
+**`timeoutMs` подбирать под `appraisal.mode`.** Дефолт в коде плагина — 2000мс,
+верно только для `mode: lexical` (без сети, ~0мс). При `mode: model` (умолчание
+с 2026-09-10) `/event` синхронно ждёт сетевой вызов к ollama/llama.cpp — тёплый
+~4-6с, холодный до ~50с (docs/04-model-l1.md). С `timeoutMs: 2000` клиент почти
+всегда отваливается раньше ответа сервера — сервер потом пишет ответ в уже
+закрытый сокет (`BrokenPipeError` в журнале MOTUS, безвредно для состояния, но
+карточка в этот ход не попадает в промпт). Ставить `timeoutMs` заметно больше
+`appraisal.timeout_s` (55 по умолчанию), например 60000:
+`openclaw config set plugins.entries.motus.config.timeoutMs 60000`.
 
 ## Файлы
 
@@ -46,8 +56,8 @@ incus exec grach -- su - openclaw -c '~/.npm-global/bin/openclaw plugins enable 
 
 # 3. права хуков в ~/.openclaw/openclaw.json
 #    plugins.entries.motus.hooks = { allowConversationAccess: true, allowPromptInjection: true }
-#    plugins.entries.motus.config = { applyGate: false }
-#    (без allow* хук before_prompt_build не вызывается)
+#    plugins.entries.motus.config = { applyGate: false, timeoutMs: 60000 }
+#    (без allow* хук before_prompt_build не вызывается; про timeoutMs см. выше)
 
 # 4. перезапустить gateway
 incus exec grach -- bash -c 'sudo -u openclaw XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart openclaw-gateway'
