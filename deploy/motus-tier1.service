@@ -20,7 +20,7 @@ Environment=MOTUS_TIER1_OPENCLAW=/home/openclaw/.npm-global/bin/openclaw
 # Пусто = взять из DEFAULT_OC_ARGS ("--isolated --local-model-lean").
 # Если exec-defaults окажутся слишком узкими для задач памяти/обзора — сменить,
 # например: --oc-args "--config /opt/motus-tier1/oc-restricted.json"
-Environment=MOTUS_TIER1_OC_ARGS=--isolated --local-model-lean
+Environment="MOTUS_TIER1_OC_ARGS=--isolated --local-model-lean"
 # Модель хода: пусто = основная модель openclaw. Для дешевизны можно указать
 # локальную, напр. MOTUS_TIER1_MODEL=ollama/g26-heretic:latest
 Environment=MOTUS_TIER1_MODEL=
