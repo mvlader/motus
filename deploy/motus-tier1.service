@@ -1,8 +1,21 @@
 # Tier 1 — исполнитель фоновых задач MOTUS. Ставится ВНУТРИ grach (там openclaw и
 # рабочий каталог). Забирает одну задачу из проксированного публичного API MOTUS
-# на 127.0.0.1:18790, прогоняет одним изолированным ходом `openclaw agent exec`
-# без каналов наружу, проверяет результат и шлёт /consummation.
+# на 127.0.0.1:18790, прогоняет одним ходом `openclaw agent exec`, проверяет
+# результат и шлёт /consummation.
 # Код: одиночный stdlib-файл /opt/motus-tier1/tier1_executor.py.
+#
+# --isolated НЕ используется (2026-09-13, после того как живой прогон поймал
+# реальный баг): --isolated даёт полностью пустой auth-store — ни ключа
+# Anthropic (chat идёт через отдельный claude-cli login, не через него), ни
+# регистрации локальных ollama-моделей. Единственный способ дать ходу рабочую
+# модель — свой --config (см. deploy/tier1-exec-config.json), а --config
+# несовместим с --isolated. Без --isolated agent exec получает куда больше
+# инструментов (34 вместо ~11), включая conversations_send/conversations_turn/
+# sessions_send — то есть буквально outbound, что нарушает главное правило
+# Tier1 («фоновая задача никогда не пишет наружу»). Поэтому exec-config.json
+# сам сужает набор инструментов (`agents.entries.main.tools.allow`) до
+# read/write/edit/exec/memory/web — проверено вручную: conversations_send и
+# все каналы отправки отсутствуют в получившемся наборе.
 [Unit]
 Description=MOTUS — исполнитель фоновых задач (Tier 1)
 After=network-online.target
@@ -17,13 +30,13 @@ Environment=MOTUS_TIER1_STATE=%S/motus-tier1
 Environment=MOTUS_TIER1_MOTUSD=http://127.0.0.1:18790
 Environment=MOTUS_TIER1_CWD=/home/openclaw/.openclaw/workspace
 Environment=MOTUS_TIER1_OPENCLAW=/home/openclaw/.npm-global/bin/openclaw
-# Пусто = взять из DEFAULT_OC_ARGS ("--isolated --local-model-lean").
-# Если exec-defaults окажутся слишком узкими для задач памяти/обзора — сменить,
-# например: --oc-args "--config /opt/motus-tier1/oc-restricted.json"
-Environment="MOTUS_TIER1_OC_ARGS=--isolated --local-model-lean"
-# Модель хода: пусто = основная модель openclaw. Для дешевизны можно указать
-# локальную, напр. MOTUS_TIER1_MODEL=ollama/g26-heretic:latest
-Environment=MOTUS_TIER1_MODEL=
+# --config задаёт узкий exec-конфиг (модель + разрешённые инструменты, см.
+# комментарий выше и deploy/tier1-exec-config.json); --local-model-lean держит
+# компактную схему инструментов для мелкой модели.
+Environment="MOTUS_TIER1_OC_ARGS=--config /opt/motus-tier1/exec-config.json --local-model-lean"
+# ge4b-heretic (E4B), а не g26-heretic — тот делит ПК с живым диалогом
+# (см. docs/04-model-l1.md, тот же вывод уже был сделан для L-1-сенсора).
+Environment=MOTUS_TIER1_MODEL=ollama/ge4b-heretic:latest
 Environment=MOTUS_TIER1_TASK_TIMEOUT=420
 ExecStart=/usr/bin/python3 /opt/motus-tier1/tier1_executor.py
 # Фоновая работа не должна греть Pi в ущерб живому разговору и не должна

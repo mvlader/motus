@@ -1,0 +1,83 @@
+{
+  "models": {
+    "providers": {
+      "ollama": {
+        "baseUrl": "http://192.168.2.27:11434",
+        "apiKey": "ollama-local",
+        "api": "ollama",
+        "models": [
+          {
+            "id": "ge4b-heretic:latest",
+            "name": "ge4b-heretic:latest",
+            "reasoning": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 131072,
+            "contextTokens": 120000,
+            "maxTokens": 8192,
+            "compat": {
+              "supportsUsageInStreaming": true,
+              "supportsTools": true,
+              "supportsJsonSchemaResponseFormat": true
+            },
+            "api": "ollama"
+          },
+          {
+            "id": "g26-heretic:latest",
+            "name": "g26-heretic:latest",
+            "reasoning": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 32768,
+            "contextTokens": 32768,
+            "maxTokens": 8192,
+            "compat": {
+              "supportsUsageInStreaming": true,
+              "supportsTools": true,
+              "supportsJsonSchemaResponseFormat": true
+            },
+            "api": "ollama"
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "entries": {
+      "main": {
+        "tools": {
+          "allow": [
+            "read",
+            "write",
+            "edit",
+            "apply_patch",
+            "ls",
+            "exec",
+            "process",
+            "view_image",
+            "memory_get",
+            "memory_search",
+            "web_search",
+            "web_fetch"
+          ]
+        }
+      }
+    }
+  }
+}
