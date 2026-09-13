@@ -124,6 +124,26 @@ class Gatekeeper:
 
     # ---------------------------------------------------------------- маска
 
+    #: Пороги реакции на использование 5-часового лимита Claude (0..1).
+    #: Ниже LIMIT_SOFT — не трогаем ничего. Между SOFT и HARD — токены линейно
+    #: сжимаются (мягкая деградация, как и hot/low_energy). На HARD и выше —
+    #: это уже дело не gates.py: daemon.py отдаёт `limit_block` с готовым
+    #: текстом, и ХОД ВООБЩЕ НЕ ДОХОДИТ до модели (см. before_agent_run
+    #: в deploy/openclaw-plugin) — max_tokens здесь уже не имеет смысла.
+    LIMIT_SOFT = 0.7
+    LIMIT_HARD = 0.95
+    _LIMIT_TOKENS_AT_SOFT = 350
+    _LIMIT_TOKENS_AT_HARD = 60
+
+    @classmethod
+    def _limit_token_cap(cls, pct: float) -> int:
+        span = cls.LIMIT_HARD - cls.LIMIT_SOFT
+        frac = min(1.0, max(0.0, (pct - cls.LIMIT_SOFT) / span)) if span > 0 else 1.0
+        return round(
+            cls._LIMIT_TOKENS_AT_SOFT
+            - frac * (cls._LIMIT_TOKENS_AT_SOFT - cls._LIMIT_TOKENS_AT_HARD)
+        )
+
     def _somatic_flags(self, st: State) -> Tuple[str, ...]:
         flags: List[str] = []
         if self.h.energy(st) < 0.35:
@@ -132,6 +152,11 @@ class Gatekeeper:
             flags.append("hot")
         if st.somatic["integrity"] < 0.7:
             flags.append("degraded")
+        limit_pct = st.somatic.get("limit", 0.0)
+        if limit_pct >= self.LIMIT_HARD:
+            flags.append("limit_exhausted")
+        elif limit_pct > self.LIMIT_SOFT:
+            flags.append("limit_high")
         return tuple(flags)
 
     def evaluate(self, st: State) -> Gate:
@@ -145,6 +170,8 @@ class Gatekeeper:
         flags = self._somatic_flags(st)
         if "low_energy" in flags or "hot" in flags:
             max_tokens = min(max_tokens, 350)
+        if "limit_high" in flags or "limit_exhausted" in flags:
+            max_tokens = min(max_tokens, self._limit_token_cap(st.somatic.get("limit", 0.0)))
         if "degraded" in flags and "irreversible" not in forbidden:
             forbidden.append("irreversible")
 

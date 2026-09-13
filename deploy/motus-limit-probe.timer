@@ -1,0 +1,14 @@
+# Раз в 10 минут (команда бесплатная — проверено вручную, см. deploy/DEPLOY.md).
+# OnUnitActiveSec отсчитывается от завершения предыдущего прогона: если тот
+# прогон уходил в долгое ожидание точного момента сброса (limit_probe.py,
+# --max-wait), следующий тик просто сдвигается, наложения не бывает.
+[Unit]
+Description=MOTUS — опрос лимита Claude каждые 10 минут
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=10min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

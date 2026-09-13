@@ -48,6 +48,14 @@ class State:
     last_task_t: float = -1e12
     last_sleep_t: float = 0.0
 
+    #: сколько FEAR сейчас накоплено именно от роста лимита Claude — прощается
+    #: РОВНО этим значением (не всем FEAR) на сброс лимита, см. engine.py.
+    limit_fear_added: float = 0.0
+    #: unix-время следующего сброса 5-часового лимита Claude, по последним
+    #: данным датчика (0.0 = неизвестно). Только для расчёта сообщения на
+    #: публичном API — само число наружу не идёт, идёт готовый текст.
+    claude_limit_reset_at: float = 0.0
+
     @classmethod
     def initial(cls, cfg: Dict[str, Any], t: float) -> "State":
         return cls(
@@ -81,7 +89,8 @@ class State:
         """Быстрая проверка живого состояния: все драйвы/модуляторы/сома конечны
         и в разумных пределах. Дешёвый инвариант для tick()."""
         for v in (*self.drives.values(), *self.modulators.values(),
-                  *self.somatic.values(), self.tokens, self.act_penalty, self.t):
+                  *self.somatic.values(), self.tokens, self.act_penalty, self.t,
+                  self.limit_fear_added, self.claude_limit_reset_at):
             if not math.isfinite(v):
                 return False
         return True

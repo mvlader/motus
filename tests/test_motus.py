@@ -1618,6 +1618,131 @@ class TestInitiatePending(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestClaudeLimitSensor(unittest.TestCase):
+    """Соматика лимита Claude: рост -> дискретный FEAR, сброс -> прощение
+    РОВНО накопленного (не всего FEAR), пороги в gates.py."""
+
+    def _sensor(self, eng, pct, t, **extra):
+        return eng.submit_event(Event("sensor", t, {"claude_limit_pct": pct, **extra}))
+
+    def test_rising_pct_adds_discrete_fear_and_tracks_it(self):
+        cfg = cfg_full()
+        eng = Engine(cfg, VirtualClock(T0), NullJournal())
+        fear_before = eng.state.drives["FEAR"]
+        self._sensor(eng, 40, T0)
+        self._sensor(eng, 55, T0 + 600, claude_limit_delta=15)
+        self.assertGreater(eng.state.drives["FEAR"], fear_before)
+        self.assertAlmostEqual(eng.state.limit_fear_added, eng.state.drives["FEAR"] - fear_before,
+                               places=6)
+        self.assertAlmostEqual(eng.state.somatic["limit"], 0.55, places=6)
+
+    def test_no_delta_field_means_no_impulse(self):
+        cfg = cfg_full()
+        eng = Engine(cfg, VirtualClock(T0), NullJournal())
+        fear_before = eng.state.drives["FEAR"]
+        self._sensor(eng, 80, T0)  # первый опрос — просто уровень, без claude_limit_delta
+        self.assertEqual(eng.state.drives["FEAR"], fear_before)
+        self.assertEqual(eng.state.limit_fear_added, 0.0)
+
+    def test_reset_forgives_exactly_tracked_amount_not_all_fear(self):
+        cfg = cfg_full()
+        eng = Engine(cfg, VirtualClock(T0), NullJournal())
+        # FEAR из другого источника (integrity), должен пережить сброс лимита.
+        eng.submit_event(Event("sensor", T0, {"integrity_drop": True}))
+        fear_from_integrity = eng.state.drives["FEAR"]
+        self.assertGreater(fear_from_integrity, 0.0)
+
+        self._sensor(eng, 90, T0 + 60, claude_limit_delta=90)
+        added = eng.state.limit_fear_added
+        self.assertGreater(added, 0.0)
+        fear_at_peak = eng.state.drives["FEAR"]
+
+        # Тот же момент времени, что и предыдущий тик (dt=0) — естественная
+        # релаксация драйва между тиками иначе маскирует проверку "прощено
+        # ровно added", это отдельно покрыто test_reset_never_drives_fear_negative.
+        self._sensor(eng, 0, T0 + 60, claude_limit_reset=True)
+        self.assertEqual(eng.state.limit_fear_added, 0.0)
+        self.assertAlmostEqual(eng.state.drives["FEAR"], fear_at_peak - added, places=6)
+        # Прощён только вклад лимита, не весь FEAR — что-то от integrity_drop
+        # обязано остаться (не улетело в 0 вместе с лимитным вкладом).
+        self.assertGreater(eng.state.drives["FEAR"], 0.0)
+
+    def test_reset_never_drives_fear_negative(self):
+        cfg = cfg_full()
+        eng = Engine(cfg, VirtualClock(T0), NullJournal())
+        self._sensor(eng, 96, T0, claude_limit_delta=96)
+        # Драйв мог естественно затухнуть до сброса — прощение не должно уйти в минус.
+        eng.state.drives["FEAR"] = 0.0
+        self._sensor(eng, 0, T0 + 100, claude_limit_reset=True)
+        self.assertGreaterEqual(eng.state.drives["FEAR"], 0.0)
+        self.assertEqual(eng.state.limit_fear_added, 0.0)
+
+    def test_reset_at_is_recorded_for_public_message(self):
+        cfg = cfg_full()
+        eng = Engine(cfg, VirtualClock(T0), NullJournal())
+        self._sensor(eng, 50, T0, claude_limit_reset_at=T0 + 1200)
+        self.assertEqual(eng.state.claude_limit_reset_at, T0 + 1200)
+
+
+class TestClaudeLimitGate(unittest.TestCase):
+    """Пороги gates.py: мягкое урезание токенов между SOFT/HARD, флаги."""
+
+    def _gate_for_pct(self, pct):
+        cfg = cfg_full()
+        eng = Engine(cfg, VirtualClock(T0), NullJournal())
+        eng.state.somatic["limit"] = pct
+        return eng.gk.evaluate(eng.state)
+
+    def test_below_soft_untouched(self):
+        gate = self._gate_for_pct(0.5)
+        self.assertNotIn("limit_high", gate.somatic_flags)
+        self.assertNotIn("limit_exhausted", gate.somatic_flags)
+
+    def test_between_soft_and_hard_shrinks_progressively(self):
+        gate_low = self._gate_for_pct(0.75)
+        gate_high = self._gate_for_pct(0.9)
+        self.assertIn("limit_high", gate_low.somatic_flags)
+        self.assertIn("limit_high", gate_high.somatic_flags)
+        self.assertLess(gate_high.max_tokens, gate_low.max_tokens)
+        self.assertLessEqual(gate_low.max_tokens, 350)
+
+    def test_at_hard_threshold_flagged_exhausted(self):
+        gate = self._gate_for_pct(0.97)
+        self.assertIn("limit_exhausted", gate.somatic_flags)
+        self.assertNotIn("limit_high", gate.somatic_flags)
+
+
+class TestClaudeLimitPublicBlock(unittest.TestCase):
+    """daemon._limit_block: сообщение считается кодом, не моделью."""
+
+    def test_inactive_below_hard_threshold(self):
+        from motus.daemon import _limit_block
+        st = State.initial(cfg_full(), T0)
+        st.somatic["limit"] = 0.8
+        out = _limit_block(st, T0)
+        self.assertFalse(out["active"])
+        self.assertIsNone(out["message"])
+
+    def test_active_with_known_reset_gives_minutes(self):
+        from motus.daemon import _limit_block
+        st = State.initial(cfg_full(), T0)
+        st.somatic["limit"] = 0.97
+        st.claude_limit_reset_at = T0 + 600  # через 10 минут
+        out = _limit_block(st, T0)
+        self.assertTrue(out["active"])
+        self.assertIn("10 мин", out["message"])
+        self.assertEqual(out["resume_at"], T0 + 600)
+
+    def test_active_without_known_reset_still_gives_message(self):
+        from motus.daemon import _limit_block
+        st = State.initial(cfg_full(), T0)
+        st.somatic["limit"] = 0.99
+        out = _limit_block(st, T0)
+        self.assertTrue(out["active"])
+        self.assertIsNotNone(out["message"])
+        self.assertIsNone(out["resume_at"])
+
+
 class TestNonFiniteHardening(unittest.TestCase):
     def test_state_from_dict_rejects_nan_snapshot(self):
         cfg = cfg_full()

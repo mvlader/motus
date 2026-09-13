@@ -12,7 +12,7 @@ CONFIG_DIR = os.path.join(ROOT, "config")
 
 DRIVES = ("SEEKING", "CARE", "PLAY", "FEAR", "RAGE", "PANIC")
 MODULATORS = ("da", "ne", "ht5")
-SOMATIC = ("energy", "integrity", "thermal")
+SOMATIC = ("energy", "integrity", "thermal", "limit")
 
 
 class ConfigError(ValueError):

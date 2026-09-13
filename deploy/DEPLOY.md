@@ -31,6 +31,7 @@ MOTUS живёт в **отдельном контейнере `motus`**, изо�
 | датчик железа | `deploy/motus-somatic.{service,timer}` внутри `grach`, `User=motus-probe`, код `/opt/motus-probe/somatic_probe.py` |
 | исполнитель задач (Tier 1) | `deploy/motus-tier1.{service,timer}` внутри `grach`, `User=openclaw`, код `/opt/motus-tier1/tier1_executor.py`; дёргает `GET /task/next` → `openclaw agent exec --isolated` → `POST /consummation` |
 | доставка проактива (Tier 2) | `deploy/motus-tier2.{service,timer}` внутри `grach`, `User=openclaw`, код `/opt/motus-tier2/tier2_executor.py`; дёргает `GET /initiate/pending` → `openclaw agent --deliver` → (при сбое) `POST /refund`. Требует `MOTUS_TIER2_SESSION_KEY`/`MOTUS_TIER2_TO` — без получателя не стартует |
+| датчик лимита Claude | `deploy/motus-limit-probe.{service,timer}` внутри `grach`, **`User=openclaw`** (не motus-probe — нужна авторизация claude-cli), код `/opt/motus-probe/limit_probe.py`; раз в 10 мин парсит `claude -p "/usage"` → `POST /event` в MOTUS. Пороги реакции — `motus/gates.py` (`LIMIT_SOFT=0.7` мягкое урезание токенов, `LIMIT_HARD=0.95` жёсткая остановка через `before_agent_run` в плагине) |
 
 ## Развернуть с нуля
 
@@ -103,6 +104,16 @@ incus exec grach -- sh -c 'cat > /etc/systemd/system/motus-tier2.service.d/overr
 [Service]
 Environment=MOTUS_TIER2_SESSION_KEY=agent:main:telegram:direct:<id>
 EOF'
+
+# 10. датчик лимита Claude (в grach, от пользователя openclaw — нужен claude-cli login)
+incus file push deploy/limit_probe.py grach/opt/motus-probe/limit_probe.py
+incus exec grach -- chmod a+rX /opt/motus-probe/limit_probe.py
+incus file push deploy/motus-limit-probe.service grach/etc/systemd/system/
+incus file push deploy/motus-limit-probe.timer   grach/etc/systemd/system/
+# первый прогон вручную — печатает payload, ничего не шлёт:
+incus exec grach -- sudo -u openclaw python3 /opt/motus-probe/limit_probe.py --dry-run
+incus exec grach -- systemctl daemon-reload
+incus exec grach -- systemctl enable --now motus-limit-probe.timer
 incus exec grach -- systemctl daemon-reload
 # первый прогон — вручную, --dry-run печатает промпт и НЕ отправляет:
 incus exec grach -- sudo -u openclaw MOTUS_TIER2_STATE=/tmp/t2 MOTUS_TIER2_SESSION_KEY=agent:main:telegram:direct:<id> \

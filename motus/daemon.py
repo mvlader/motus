@@ -32,6 +32,7 @@ from . import __version__, appraisal, config, curator
 from .clock import Clock
 from .engine import Engine
 from .events import Event
+from .gates import Gatekeeper
 from .journal import Journal
 from .state import State
 
@@ -42,6 +43,26 @@ PUBLIC_PATHS = frozenset((
     "/health", "/state/card", "/event", "/task/next", "/consummation",
     "/refund", "/llm_call", "/initiate/pending",
 ))
+
+def _limit_block(state: State, now: float) -> Dict[str, Any]:
+    """Жёсткая остановка на пределе лимита Claude (LIMIT_HARD, см. gates.py).
+
+    Готовый ТЕКСТ считается здесь, кодом — не моделью: openclaw (before_agent_run,
+    deploy/openclaw-plugin) должен суметь ответить пользователю, даже когда сама
+    модель физически недоступна из-за исчерпанного лимита. resume_at — та же
+    информация числом, на случай если вызывающему нужно точное время, а не текст.
+    """
+    pct = state.somatic.get("limit", 0.0)
+    if pct < Gatekeeper.LIMIT_HARD:
+        return {"active": False, "message": None, "resume_at": None}
+    reset_at = state.claude_limit_reset_at or None
+    if reset_at and reset_at > now:
+        mins = max(1, round((reset_at - now) / 60))
+        message = f"Лимит Claude почти исчерпан — отвечу снова примерно через {mins} мин."
+    else:
+        message = "Лимит Claude почти исчерпан — отвечу снова, как только он сбросится."
+    return {"active": True, "message": message, "resume_at": reset_at}
+
 
 #: Tier 2: не отдавать "pending", если тишина короче этого порога — даже если
 #: движок уже решил "initiate" внутри тика, вызванного ОБЫЧНЫМ /state/card
@@ -301,7 +322,8 @@ class Handler(BaseHTTPRequestHandler):
                 gate = {k: gate[k] for k in ("regime", "may_initiate", "max_tokens",
                                              "allowed_tools", "forbidden", "context_band")}
             return self._send(200, {"card": d.card.to_dict(), "gate": gate,
-                                    "tier": d.tier})
+                                    "tier": d.tier,
+                                    "limit_block": _limit_block(svc.engine.state, svc.clock.now())})
         if path == "/state/raw":
             # Только отладка и дашборд. Эти числа не должны попадать в промпт.
             with svc.lock:

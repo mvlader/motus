@@ -147,7 +147,8 @@
   "somatic": {
     "energy": 0.7,
     "integrity": 1.0,
-    "thermal": 0.0
+    "thermal": 0.0,
+    "limit": 0.0
   },
   "repertoire": {
     "min_score": 0.3,

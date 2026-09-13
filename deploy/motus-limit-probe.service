@@ -1,0 +1,24 @@
+# Опрос 5-часового лимита Claude (`claude -p "/usage"`). Ставится ВНУТРИ grach,
+# POST'ит в проксированный публичный API MOTUS на 127.0.0.1:18790.
+# Код: одиночный stdlib-файл /opt/motus-probe/limit_probe.py.
+#
+# User=openclaw, НЕ motus-probe: `claude -p "/usage"` читает авторизацию
+# claude-cli, которая живёт в HOME пользователя openclaw (та же, которой ходит
+# основной чат) — под другим пользователем команда просто не увидит подписку.
+[Unit]
+Description=MOTUS — опрос лимита Claude
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=openclaw
+StateDirectory=motus-limit-probe
+Environment=MOTUS_LIMIT_PROBE_STATE=%S/motus-limit-probe/prev.json
+Environment=HOME=/home/openclaw
+ExecStart=/usr/bin/python3 /opt/motus-probe/limit_probe.py \
+  --motusd http://127.0.0.1:18790 \
+  --claude-bin /home/openclaw/.npm-global/bin/claude
+# Может ждать внутри до max-wait (11 мин по умолчанию) под точную допроверку
+# сброса лимита (см. комментарий в limit_probe.py) — щедрый запас сверху.
+TimeoutStartSec=800
+NoNewPrivileges=yes

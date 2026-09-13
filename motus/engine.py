@@ -155,10 +155,23 @@ class Engine:
             self.state.last_context_t = ev.t
         elif ev.kind == "sensor":
             self.state.somatic = self.ap.somatic_update(self.state.somatic, ev.payload)
+            if "claude_limit_reset_at" in ev.payload:
+                self.state.claude_limit_reset_at = float(ev.payload["claude_limit_reset_at"])
+            if ev.payload.get("claude_limit_reset"):
+                # Сброс лимита Claude прощает РОВНО то, что этот механизм сам
+                # накопил в FEAR — не весь FEAR (там может быть вклад от
+                # integrity/other), и не монотонно растущий храповик: копится
+                # и гасится один и тот же счётчик (docs/03-formulas.md).
+                forgive = self.state.limit_fear_added
+                if forgive:
+                    self.state.drives["FEAR"] = max(0.0, self.state.drives["FEAR"] - forgive)
+                    self.state.limit_fear_added = 0.0
 
         imps = self.ap.impulses(ev)
         for imp in imps:
             applied = self.h.apply_impulse(self.state, imp)
+            if imp.key == "claude_limit":
+                self.state.limit_fear_added += applied
             self.journal.write(
                 "impulse", ev.t, {**imp.to_dict(), "applied": round(applied, 5)}
             )

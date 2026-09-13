@@ -305,12 +305,25 @@ class Appraiser:
 
         return []
 
+    #: Прирост FEAR на каждый процентный пункт роста использования 5-часового
+    #: лимита Claude. 10 п.п. роста -> 0.12 FEAR — тот же порядок, что и разовый
+    #: скачок FEAR от integrity_drop (0.15). Не конфиг: как и integrity_drop,
+    #: это разовая соматическая константа, а не поведенческий параметр.
+    _FEAR_PER_LIMIT_PCT = 0.012
+
     @staticmethod
     def _sensor_impulses(p: Dict[str, Any]) -> List[Impulse]:
         out: List[Impulse] = []
         if p.get("integrity_drop"):
             out.append(Impulse("FEAR", 0.15, "integrity"))
             out.append(Impulse("CARE", 0.15, "integrity"))
+        delta = p.get("claude_limit_delta")
+        if delta and delta > 0:
+            # Рост, не сам процент: держит квоту вплотную к лимиту не страшнее,
+            # чем к нему подойти — страшно РЕЗКО его приближение (см. gates.py
+            # для порогов реакции на сам уровень, это отдельная, немгновенная ось).
+            amt = float(delta) * Appraiser._FEAR_PER_LIMIT_PCT
+            out.append(Impulse("FEAR", amt, "claude_limit"))
         return out
 
     @staticmethod
@@ -342,4 +355,7 @@ class Appraiser:
 
         if "energy" in p:
             s["energy"] = max(0.0, min(1.0, float(p["energy"])))
+
+        if "claude_limit_pct" in p:
+            s["limit"] = max(0.0, min(1.0, float(p["claude_limit_pct"]) / 100.0))
         return s

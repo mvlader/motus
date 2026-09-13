@@ -1,7 +1,13 @@
 // Мост openclaw → MOTUS. Формат — как у остальных плагинов openclaw
 // (~/.openclaw/extensions/<id>/index.js, плоский объект с register(api)).
 //
-// Два хука:
+// Три хука:
+//
+// before_agent_run — ДО вызова модели вообще (input gate, может заблокировать
+//   ход целиком): если лимит Claude почти исчерпан (gate.limit_block.active в
+//   MOTUS, см. motus/gates.py LIMIT_HARD), отвечает пользователю готовым
+//   ТЕКСТОМ, посчитанным кодом в MOTUS, а не моделью — лимит не тратится на
+//   попытку, которая всё равно не пройдёт. Работает независимо от applyGate.
 //
 // before_prompt_build — перед каждым ходом агента:
 //   1. отдаёт текст сообщения пользователя в MOTUS (POST /event);
@@ -51,6 +57,24 @@ export default {
 
     const call = (path, init) =>
       fetch(base + path, { signal: AbortSignal.timeout(timeoutMs), ...(init || {}) });
+
+    api.on("before_agent_run", async () => {
+      try {
+        const r = await call("/state/card");
+        if (!r.ok) return { outcome: "pass" };
+        const d = await r.json();
+        const block = d && d.limit_block;
+        if (block && block.active && typeof block.message === "string") {
+          log.info(`motus: ход заблокирован — лимит Claude почти исчерпан`);
+          return { outcome: "block", reason: "claude_limit", message: block.message,
+                   category: "cost_limit" };
+        }
+        return { outcome: "pass" };
+      } catch (e) {
+        log.info(`motus: проверка лимита недоступна (${(e && e.name) || e}) — ход как обычно`);
+        return { outcome: "pass" };
+      }
+    });
 
     api.on("before_prompt_build", async (event) => {
       const text = typeof (event && event.prompt) === "string" ? event.prompt.trim() : "";
