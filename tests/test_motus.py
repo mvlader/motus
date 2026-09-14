@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import datetime
 import json
 import math
 import unittest.mock
@@ -48,6 +49,12 @@ _t2_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 _t2_spec = importlib.util.spec_from_file_location("tier2_executor", _t2_path)
 tier2_executor = importlib.util.module_from_spec(_t2_spec)
 _t2_spec.loader.exec_module(tier2_executor)
+
+_limit_probe_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 "deploy", "limit_probe.py")
+_limit_probe_spec = importlib.util.spec_from_file_location("limit_probe", _limit_probe_path)
+limit_probe = importlib.util.module_from_spec(_limit_probe_spec)
+_limit_probe_spec.loader.exec_module(limit_probe)
 
 T0 = 1767225600.0  # фиксированная точка отсчёта, чтобы тесты не зависели от «сегодня»
 
@@ -1741,6 +1748,75 @@ class TestClaudeLimitPublicBlock(unittest.TestCase):
         self.assertTrue(out["active"])
         self.assertIsNotNone(out["message"])
         self.assertIsNone(out["resume_at"])
+
+
+class TestLimitProbeParsing(unittest.TestCase):
+    """deploy/limit_probe.py: regression-тест на реальный баг с живого деплоя
+    (2026-09-13) — сразу после сброса, пока использование ровно 0%, CLI
+    печатает "Current session: 0% used" БЕЗ "· resets ...". Жёсткий regex без
+    опционального суффикса ронял парсинг молча на каждом опросе после сброса —
+    MOTUS замерзал на последнем успешно распознанном % (в бою — на 97%)
+    навсегда, потому что build_payload() ни разу не видел падения процента."""
+
+    def _now(self):
+        return datetime.datetime(2026, 9, 13, 19, 38, tzinfo=datetime.timezone.utc)
+
+    def test_zero_percent_without_reset_suffix_still_parses(self):
+        text = (
+            "You are currently using your subscription to power your Claude Code usage\n\n"
+            "Current session: 0% used\n"
+            "Current week (all models): 32% used · resets Sep 19, 8:59am (America/Toronto)\n"
+        )
+        out = limit_probe.parse_usage(text, self._now())
+        self.assertIsNotNone(out, "0% без suffix обязан парситься — это и был живой баг")
+        pct, reset_at = out
+        self.assertEqual(pct, 0.0)
+        self.assertIsNone(reset_at)
+
+    def test_normal_format_with_reset_still_works(self):
+        text = "Current session: 15% used · resets Sep 14, 2:10am (America/Toronto)"
+        pct, reset_at = limit_probe.parse_usage(text, self._now())
+        self.assertEqual(pct, 15.0)
+        self.assertIsNotNone(reset_at)
+
+    def test_completely_unrecognized_text_returns_none(self):
+        self.assertIsNone(limit_probe.parse_usage("что-то совсем другое", self._now()))
+
+    def test_drop_to_zero_without_reset_time_is_detected_as_reset(self):
+        """Именно тот сценарий, который сломался в бою: 97% -> 0% (без
+        известного времени сброса в этом самом ответе) обязан дать
+        claude_limit_reset=True, а не тихо потеряться."""
+        payload = limit_probe.build_payload(0.0, None, {"pct": 97.0, "reset_at": 1789341000.0})
+        self.assertTrue(payload.get("claude_limit_reset"))
+        self.assertNotIn("claude_limit_delta", payload)
+
+    def test_poll_once_does_not_erase_previously_known_reset_at(self):
+        """poll_once() не должен затирать последний известный reset_at, если
+        именно в ЭТОМ ответе он отсутствовал — иначе следующий /state/card
+        потеряет даже приблизительную оценку времени возврата. Гоняем настоящий
+        poll_once() дважды подряд с подменённым run_usage — ровно та
+        последовательность, что сломалась в бою (97% с reset_at, затем 0% без)."""
+        tmp = tempfile.mkdtemp(prefix="motus-limitprobe-")
+        state_path = pathlib.Path(tmp) / "state.json"
+        with_reset = "Current session: 97% used · resets Sep 13, 7:10pm (America/Toronto)"
+        without_reset = "Current session: 0% used"
+        try:
+            with unittest.mock.patch.object(limit_probe, "STATE_FILE", state_path), \
+                 unittest.mock.patch.object(limit_probe, "run_usage", return_value=with_reset):
+                _, reset_at_1 = limit_probe.poll_once("claude", 5.0, "http://x:0", dry_run=True)
+                self.assertIsNotNone(reset_at_1)
+
+            with unittest.mock.patch.object(limit_probe, "STATE_FILE", state_path), \
+                 unittest.mock.patch.object(limit_probe, "run_usage", return_value=without_reset):
+                _, reset_at_2 = limit_probe.poll_once("claude", 5.0, "http://x:0", dry_run=True)
+                # Этот ответ сам по себе reset_at не знает...
+                self.assertIsNone(reset_at_2)
+                # ...но на диске должно было остаться прошлое значение, не None.
+                saved = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertEqual(saved["reset_at"], reset_at_1)
+                self.assertEqual(saved["pct"], 0.0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestNonFiniteHardening(unittest.TestCase):

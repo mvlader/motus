@@ -44,8 +44,15 @@ RESET_DROP_THRESHOLD = 15.0
 
 STATE_FILE = Path(os.environ.get("MOTUS_LIMIT_PROBE_STATE", "/tmp/motus-limit-probe.json"))
 
+#: "· resets ..." — ОПЦИОНАЛЬНО: живой прогон поймал реальный случай — прямо
+#: после сброса, пока использование ровно 0%, CLI печатает "Current session:
+#: 0% used" БЕЗ времени следующего сброса вообще. Жёсткое требование суффикса
+#: молча роняло парсинг на каждом опросе после сброса — MOTUS замерзал на
+#: последнем УСПЕШНО распознанном значении (в этом случае — на 97%) навсегда,
+#: потому что build_payload() ни разу не получал шанс увидеть падение процента.
 _SESSION_RE = re.compile(
-    r"Current session:\s*(\d+)%\s*used\s*·\s*resets\s+([A-Za-z]+ \d+, \d+:\d+(?:am|pm))",
+    r"Current session:\s*(\d+)%\s*used"
+    r"(?:\s*·\s*resets\s+([A-Za-z]+ \d+, \d+:\d+(?:am|pm)))?",
     re.IGNORECASE,
 )
 
@@ -57,8 +64,13 @@ def run_usage(claude_bin: str, timeout_s: float) -> str:
     return proc.stdout
 
 
-def parse_usage(text: str, now: datetime.datetime) -> Optional[tuple[float, float]]:
-    """-> (pct, reset_at_epoch) или None, если формат не распознан.
+def parse_usage(text: str, now: datetime.datetime) -> Optional[tuple[float, Optional[float]]]:
+    """-> (pct, reset_at_epoch_или_None) или None, если pct вообще не распознан.
+
+    reset_at может отсутствовать в тексте (см. _SESSION_RE) — прямо после
+    сброса, пока использование ровно 0%, CLI не печатает время следующего
+    сброса вообще. pct — обязателен: он единственное, что позволяет вообще
+    заметить, что сброс произошёл (см. build_payload).
 
     Год не печатается — берём текущий, и если получившаяся дата в прошлом
     (переход через полночь/полночь года — редкость, но не должна дать сброс
@@ -73,11 +85,14 @@ def parse_usage(text: str, now: datetime.datetime) -> Optional[tuple[float, floa
     if not m:
         return None
     pct = float(m.group(1))
-    when_str = f"{m.group(2)} {now.year}"
+    when = m.group(2)
+    if not when:
+        return pct, None
+    when_str = f"{when} {now.year}"
     try:
         reset_dt = datetime.datetime.strptime(when_str, "%b %d, %I:%M%p %Y")
     except ValueError:
-        return None
+        return pct, None
     reset_dt = reset_dt.replace(tzinfo=now.tzinfo)
     if reset_dt < now:
         reset_dt = reset_dt.replace(year=reset_dt.year + 1)
@@ -98,8 +113,10 @@ def _save_prev(d: dict) -> None:
         pass
 
 
-def build_payload(pct: float, reset_at: float, prev: dict) -> dict:
-    payload: dict = {"claude_limit_pct": pct, "claude_limit_reset_at": reset_at}
+def build_payload(pct: float, reset_at: Optional[float], prev: dict) -> dict:
+    payload: dict = {"claude_limit_pct": pct}
+    if reset_at is not None:
+        payload["claude_limit_reset_at"] = reset_at
     prev_pct = prev.get("pct")
     if prev_pct is not None:
         if pct + RESET_DROP_THRESHOLD < prev_pct:
@@ -143,7 +160,9 @@ def poll_once(claude_bin: str, timeout_s: float, motusd: str, dry_run: bool) -> 
     pct, reset_at = parsed
     prev = _load_prev()
     payload = build_payload(pct, reset_at, prev)
-    _save_prev({"pct": pct, "reset_at": reset_at})
+    # reset_at может отсутствовать именно в этом ответе (сразу после сброса,
+    # 0% без времени следующего) — не затираем последний известный None'ом.
+    _save_prev({"pct": pct, "reset_at": reset_at if reset_at is not None else prev.get("reset_at")})
 
     if dry_run:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
