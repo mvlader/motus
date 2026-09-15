@@ -2500,5 +2500,45 @@ class TestQuietHours(unittest.TestCase):
         self.assertIn("self.bg.may_initiate(st, self.clock.local_hour(st.t))", src)
 
 
+
+
+class TestForbiddenOutboundMeansSilence(unittest.TestCase):
+    """«Не перебивать» и «не отправлять вообще» — разные вещи, и путать их
+    нельзя (2026-09-15).
+
+    forbidden="outbound" действует ДВУМЯ путями, оба глушат и обычный ответ
+    человеку, а не только инициативу:
+      1) вербализатор кладёт в карточку «Ничего не отправляй наружу» — карточка
+         уходит модели всегда, независимо от applyGate;
+      2) хук message_sending в плагине при applyGate=true отменяет отправку.
+
+    Запрет инициативы выражается через may_initiate=False и только через него.
+    PLAY на этом погорел: смысл был «играть можно, вторгаться нет», а по факту
+    бот замолкал в ответ на прямой вопрос."""
+
+    def test_play_cannot_initiate_but_is_not_silenced(self):
+        pol = REGIME_POLICY["PLAY"]
+        self.assertFalse(pol.may_initiate, "PLAY не должен иметь права перебивать")
+        self.assertNotIn("outbound", pol.forbidden,
+                         "PLAY не должен затыкать ответ на прямой вопрос")
+
+    def test_only_deliberately_silent_regimes_forbid_outbound(self):
+        """Список режимов с полным запретом отправки — осознанный и короткий.
+        Если он изменился, это должно быть намеренным решением, а не побочным
+        эффектом правки политики."""
+        silent = sorted(r for r, p in REGIME_POLICY.items() if "outbound" in p.forbidden)
+        self.assertEqual(
+            silent, ["RAGE"],
+            "полностью молчащий режим сейчас только один — RAGE "
+            "(«злой бот теряет право писать, а не получает его»)")
+
+    def test_lexicon_phrase_for_outbound_is_indeed_total(self):
+        """Тест держит связь между кодом и текстом: фраза действительно
+        запрещает отправку целиком, а не «не пиши первым» — поэтому её и
+        нельзя вешать на режим, который обязан отвечать."""
+        phrase = cfg_full()["_lexicon"]["constraints"]["outbound"]
+        self.assertIn("не отправляй", phrase.lower())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
