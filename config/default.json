@@ -120,7 +120,14 @@
     "unanswered_after_s": 5400,
     "initiation_enabled": true,
     "_note": "penalty_tau_s намеренно велик: штраф за молчание должен сниматься ВОЗВРАЩЕНИЕМ пользователя, а не просто течением времени.",
-    "_note_initiation": "initiation_enabled=true (2026-09-12) — Tier 2 включён осознанно оператором: канал доставки (motus-tier2, session-key agent:main:main) задеплоен и проверен. Если проактив начнёт спамить/мешать — вернуть false и рестартовать motusd."
+    "_note_initiation": "initiation_enabled=true (2026-09-12) — Tier 2 включён осознанно оператором: канал доставки (motus-tier2, session-key agent:main:main) задеплоен и проверен. Если проактив начнёт спамить/мешать — вернуть false и рестартовать motusd.",
+    "quiet_hours": {
+      "enabled": true,
+      "start_hour": 0.0,
+      "end_hour": 7.0,
+      "grace_after_contact_s": 300,
+      "_note": "Тихие часы оператора: MOTUS не инициирует контакт сам в этом окне. На ОТВЕТЫ не влияет — на входящее сообщение бот отвечает всегда. grace_after_contact_s снимает окно, если человек сам недавно написал."
+    }
   },
   "heartbeat": {
     "_units": "theta_task и theta_act — в НОРМИРОВАННОЙ активации a = x / theta_hi_eff",

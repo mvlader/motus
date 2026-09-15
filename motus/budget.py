@@ -6,9 +6,18 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from .state import State
+
+
+def _in_window(hour: float, start: float, end: float) -> bool:
+    """Час внутри окна [start, end). Окно через полночь (23→7) тоже работает."""
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
 
 
 class Budget:
@@ -21,8 +30,26 @@ class Budget:
     def theta_act_eff(self, cfg: Dict[str, Any], st: State) -> float:
         return cfg["heartbeat"]["theta_act"] + st.act_penalty
 
-    def may_initiate(self, st: State) -> Tuple[bool, str]:
-        """Возвращает (можно, причина отказа). Причина уходит в журнал."""
+    def may_initiate(self, st: State, local_hour: Optional[float] = None) -> Tuple[bool, str]:
+        """Возвращает (можно, причина отказа). Причина уходит в журнал.
+
+        local_hour (2026-09-15) — локальный час оператора для «тихих часов».
+        None означает «часы не переданы» и отключает проверку: так старый
+        вызывающий код и тесты не ломаются, но боевой путь (engine._decide)
+        передаёт час всегда.
+        """
+        quiet = self.cfg.get("quiet_hours") or {}
+        if quiet.get("enabled") and local_hour is not None:
+            grace_s = float(quiet.get("grace_after_contact_s", 0.0))
+            silence_s = st.t - st.last_contact_t
+            # Свежий контакт снимает тихие часы: если человек сам написал,
+            # значит он не спит, и молчать «из уважения ко сну» незачем.
+            if silence_s >= grace_s and _in_window(
+                local_hour,
+                float(quiet.get("start_hour", 0.0)),
+                float(quiet.get("end_hour", 0.0)),
+            ):
+                return False, "quiet_hours"
         if not self.cfg.get("initiation_enabled", True):
             # Канала доставки проактивных сообщений (Tier 2) ещё нет: плагин
             # openclaw читает только карточку и события. При initiation_enabled=false

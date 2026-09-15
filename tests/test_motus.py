@@ -2424,5 +2424,81 @@ class TestJournalKindsStayRegistered(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+
+
+class TestQuietHours(unittest.TestCase):
+    """Тихие часы оператора (2026-09-15). Гейт ТОЛЬКО на инициацию: на ответ
+    входящему сообщению не влияет никак — may_initiate вообще не участвует в
+    пути ответа. Свежий контакт снимает окно (grace_after_contact_s): если
+    человек написал сам, он не спит."""
+
+    def _cfg(self, **over):
+        from motus.budget import Budget
+        c = copy.deepcopy(cfg_initiating())
+        q = {"enabled": True, "start_hour": 0.0, "end_hour": 7.0,
+             "grace_after_contact_s": 300}
+        q.update(over)
+        c["budget"]["quiet_hours"] = q
+        return c, Budget(c)
+
+    def _state(self, cfg, silence_s):
+        st = State.initial(cfg, T0)
+        st.t = T0 + silence_s
+        st.last_contact_t = T0
+        st.tokens = 3.0
+        st.last_initiation_t = T0 - 1e6
+        return st
+
+    def test_blocks_initiation_inside_window(self):
+        cfg, bg = self._cfg()
+        st = self._state(cfg, silence_s=4000.0)
+        ok, why = bg.may_initiate(st, local_hour=3.0)
+        self.assertFalse(ok)
+        self.assertEqual(why, "quiet_hours")
+
+    def test_allows_initiation_outside_window(self):
+        cfg, bg = self._cfg()
+        st = self._state(cfg, silence_s=4000.0)
+        ok, why = bg.may_initiate(st, local_hour=12.0)
+        self.assertTrue(ok, f"вне окна инициация должна быть разрешена, отказ: {why}")
+
+    def test_fresh_contact_lifts_the_window(self):
+        """Человек написал минуту назад в 03:00 — он явно не спит."""
+        cfg, bg = self._cfg()
+        st = self._state(cfg, silence_s=60.0)
+        ok, _ = bg.may_initiate(st, local_hour=3.0)
+        self.assertTrue(ok)
+        # ...а через час молчания окно снова действует
+        st2 = self._state(cfg, silence_s=3600.0)
+        ok2, why2 = bg.may_initiate(st2, local_hour=3.0)
+        self.assertFalse(ok2)
+        self.assertEqual(why2, "quiet_hours")
+
+    def test_window_across_midnight(self):
+        cfg, bg = self._cfg(start_hour=23.0, end_hour=7.0)
+        st = self._state(cfg, silence_s=4000.0)
+        for hour in (23.5, 0.5, 6.9):
+            self.assertFalse(bg.may_initiate(st, local_hour=hour)[0], f"час {hour}")
+        for hour in (7.1, 12.0, 22.9):
+            self.assertTrue(bg.may_initiate(st, local_hour=hour)[0], f"час {hour}")
+
+    def test_disabled_window_changes_nothing(self):
+        cfg, bg = self._cfg(enabled=False)
+        st = self._state(cfg, silence_s=4000.0)
+        self.assertTrue(bg.may_initiate(st, local_hour=3.0)[0])
+
+    def test_no_local_hour_means_no_check(self):
+        """Старый вызов без часа (и реплей) не должен внезапно начать
+        блокироваться тихими часами."""
+        cfg, bg = self._cfg()
+        st = self._state(cfg, silence_s=4000.0)
+        self.assertTrue(bg.may_initiate(st)[0])
+
+    def test_engine_passes_local_hour_through(self):
+        """Регрессия: гейт бесполезен, если engine._decide() не передаёт час."""
+        src = inspect.getsource(sys.modules["motus.engine"])
+        self.assertIn("self.bg.may_initiate(st, self.clock.local_hour(st.t))", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

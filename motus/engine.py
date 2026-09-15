@@ -320,7 +320,7 @@ class Engine:
         act = gate.activation
 
         if gate.may_initiate and act >= self.bg.theta_act_eff(self.cfg, st):
-            ok, why = self.bg.may_initiate(st)
+            ok, why = self.bg.may_initiate(st, self.clock.local_hour(st.t))
             if ok:
                 # Токен списывается сразу: если вызывающий не воспользуется правом,
                 # оно просто пропадёт. Fail-closed — так спам невозможен даже при
