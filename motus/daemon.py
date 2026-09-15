@@ -83,7 +83,7 @@ class Service:
         self.state_path = os.path.join(var_dir, "state.json")
         self.repertoire_path = os.path.join(var_dir, "repertoire.json")
         self.journal = Journal(os.path.join(var_dir, "journal"))
-        self.clock = Clock()
+        self.clock = Clock(config.tz_offset_s(cfg, time.time()))
         self.lock = threading.Lock()
         # Отдельный лок для оценки текста (L-1): сама она идёт ВНЕ self.lock
         # (см. /event), но модельный сенсор — один на процесс, параллельные

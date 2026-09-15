@@ -60,7 +60,8 @@ class Verbalizer:
         segs.append((_P_TIME, f"{contact}; {band}."))
 
         reg = self.lex["regimes"][gate.regime]
-        segs.append((_P_TONE, f"Состояние: {reg['tone']}."))
+        label = self.lex.get("state_label", "Состояние")
+        segs.append((_P_TONE, f"{label}: {reg['tone']}."))
         for i, d in enumerate(reg["directives"][:2]):
             segs.append((_P_DIRECTIVE0 if i == 0 else _P_DIRECTIVE1, d))
 

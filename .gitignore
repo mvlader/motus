@@ -4,3 +4,6 @@ var/*
 
 __pycache__/
 *.pyc
+
+# Бэкапы, которые делает tools/motusctl.py перед записью конфига.
+config/*.bak-*

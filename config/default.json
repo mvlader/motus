@@ -94,6 +94,10 @@
     "peak_hour": 15.0,
     "weight": 0.6
   },
+  "clock": {
+    "timezone": "America/Toronto",
+    "_note": "IANA-имя пояса оператора. Пусто — системный пояс контейнера (контейнер motus живёт в UTC!). motusctl по умолчанию подставляет пояс своей консоли. Смещение фиксируется при старте motusd."
+  },
   "separation": {
     "grace_s": 3600,
     "tau_s": 14400,
@@ -145,7 +149,9 @@
     "invalidation_fear_impulse": 0.3
   },
   "verbalizer": {
-    "max_chars": 320
+    "max_chars": 320,
+    "lexicon": "ru",
+    "_note": "lexicon — язык карточки для модели (config/lexicon.<код>.json): ru|en, умолчание en. Не язык меню motusctl."
   },
   "sleep": {
     "period_s": 86400,

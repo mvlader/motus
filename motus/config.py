@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Optional
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = os.path.join(ROOT, "config")
@@ -13,6 +13,11 @@ CONFIG_DIR = os.path.join(ROOT, "config")
 DRIVES = ("SEEKING", "CARE", "PLAY", "FEAR", "RAGE", "PANIC")
 MODULATORS = ("da", "ne", "ht5")
 SOMATIC = ("energy", "integrity", "thermal", "limit")
+
+#: Языки лексикона карточки: config/lexicon.<код>.json. Это язык, на котором
+#: карточка говорит с моделью (внутренняя речь бота), а не язык меню motusctl.
+LEXICONS = ("ru", "en")
+DEFAULT_LEXICON = "en"
 
 
 class ConfigError(ValueError):
@@ -25,11 +30,45 @@ def load_json(path: str) -> Dict[str, Any]:
 
 
 def load(config_dir: str = CONFIG_DIR) -> Dict[str, Any]:
-    cfg = load_json(os.path.join(config_dir, "default.json"))
-    cfg["_lexicon"] = load_json(os.path.join(config_dir, "lexicon.ru.json"))
+    return assemble(load_json(os.path.join(config_dir, "default.json")), config_dir)
+
+
+def lexicon_name(cfg: Dict[str, Any]) -> str:
+    return cfg.get("verbalizer", {}).get("lexicon", DEFAULT_LEXICON)
+
+
+def assemble(cfg: Dict[str, Any], config_dir: str = CONFIG_DIR) -> Dict[str, Any]:
+    """Дополнить разобранный default.json лексиконом и репертуаром и провалидировать.
+
+    Отдельно от load(), чтобы motusctl мог проверить кандидата на запись (ещё не
+    лежащего на диске) ровно тем же путём, каким его потом загрузит демон.
+    """
+    lex = lexicon_name(cfg)
+    if lex not in LEXICONS:
+        raise ConfigError(f"verbalizer.lexicon: ожидается {'|'.join(LEXICONS)}, получено {lex!r}")
+    cfg["_lexicon"] = load_json(os.path.join(config_dir, f"lexicon.{lex}.json"))
     cfg["_repertoire"] = load_json(os.path.join(config_dir, "repertoire.json"))
     validate(cfg)
     return cfg
+
+
+def tz_offset_s(cfg: Dict[str, Any], t: float) -> Optional[float]:
+    """Смещение от UTC для clock.timezone на момент t; None — брать системное.
+
+    Фиксируется один раз при старте демона (см. Clock): IANA-имя нужно только
+    чтобы не зависеть от часового пояса контейнера.
+    """
+    name = cfg.get("clock", {}).get("timezone") or ""
+    if not name:
+        return None
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        zone = ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ConfigError(f"clock.timezone: неизвестный часовой пояс {name!r}") from exc
+    off = datetime.fromtimestamp(t, timezone.utc).astimezone(zone).utcoffset()
+    return off.total_seconds() if off is not None else 0.0
 
 
 #: Пути в конфиге (точечная нотация), значение которых делит exp(−·/τ) или иначе
@@ -117,10 +156,19 @@ def validate(cfg: Dict[str, Any]) -> None:
     if not 1.0 > ctx["band_fresh"] > ctx["band_aging"] > ctx["band_stale"] > 0.0:
         raise ConfigError("полосы свежести должны убывать: fresh > aging > stale > 0")
 
+    lexn = lexicon_name(cfg)
+    if lexn not in LEXICONS:
+        raise ConfigError(f"verbalizer.lexicon: ожидается {'|'.join(LEXICONS)}, получено {lexn!r}")
     lex = cfg.get("_lexicon", {})
     for name in DRIVES:
         if name not in lex.get("regimes", {}):
-            raise ConfigError(f"в лексиконе нет режима {name}")
+            raise ConfigError(f"в лексиконе {lexn} нет режима {name}")
+
+    tz = cfg.get("clock", {}).get("timezone", "")
+    if not isinstance(tz, str):
+        raise ConfigError("clock.timezone: ожидается строка (IANA-имя) или пусто")
+    if tz:
+        tz_offset_s(cfg, 0.0)  # бросит ConfigError на неизвестном имени
 
     ap = cfg.get("appraisal", {})
     mode = ap.get("mode", "model")
