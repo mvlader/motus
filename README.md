@@ -114,8 +114,10 @@ python3 tools/motusctl.py
   `max_tokens`, после 95 % — ход не доходит до модели, пользователь получает
   готовый текст «отвечу примерно через N мин» (хук `before_agent_run`)
 - **Tier 1 — консумматорные акты** (`deploy/tier1_executor.py`, таймер в grach):
-  `GET /task/next` → один ход `openclaw agent exec` с узким exec-конфигом (без
-  каналов отправки и без веба) → проверка факта кодом → `POST /consummation`.
+  `GET /task/next` → один ход `claude -p` (`claude-sonnet-5`, только файловые
+  инструменты Read/Glob/Grep/Write/Edit, личность из `SOUL.md`/`IDENTITY.md`) →
+  проверка факта кодом → `POST /consummation`. Отказ Claude или лимит на пределе —
+  запасной путь `openclaw agent exec` с узким exec-конфигом и `ge4b-heretic` на ПК.
   Часть актов (`consummation.type: "reflection"`) не требует артефакта
 - **Tier 2 — проактивные сообщения** (`deploy/tier2_executor.py`): включено
   (`budget.initiation_enabled: true` с 2026-09-12), `GET /initiate/pending` →

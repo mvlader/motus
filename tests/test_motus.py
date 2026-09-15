@@ -2084,6 +2084,125 @@ class TestTier1Executor(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestTier1ClaudePrimary(unittest.TestCase):
+    """Tier 1: Claude через claude -p основным, openclaw + локальная модель — запасным."""
+
+    def _args(self, tmp, claude_model="claude-sonnet-5"):
+        return argparse.Namespace(
+            motusd="http://x", state_dir=pathlib.Path(tmp), workspace=pathlib.Path(tmp),
+            openclaw="/bin/false", oc_args="--config c.json", model="ollama/ge4b-heretic:latest",
+            claude="/opt/claude", claude_model=claude_model, task_timeout=5, dry_run=False,
+        )
+
+    def _task(self):
+        return {"template_id": "prepare_reentry", "drive": "PANIC", "prompt": "собери записку",
+                "allowed_tools": ["read", "memory", "write"],
+                "consummation": {"type": "artifact_created"}, "max_tokens": 500, "issued_t": 42.0}
+
+    def _get(self, limit_active=False):
+        task = self._task()
+        def fake_get(url, **k):
+            if url.endswith("/task/next"):
+                return {"task": task}
+            return {"limit_block": {"active": limit_active}}
+        return fake_get
+
+    def _drop(self, tmp):
+        d = pathlib.Path(tmp) / ".motus" / "drops" / "prepare_reentry-42"
+        d.parent.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def test_tools_never_include_shell_web_or_outbound(self):
+        for needs_drop in (True, False):
+            for gate in (["read"], ["read", "memory", "exec", "write", "net"]):
+                t = tier1_executor.claude_tools(gate, needs_drop)
+                self.assertTrue(set(t) <= {"Read", "Glob", "Grep", "Write", "Edit"}, t)
+        self.assertNotIn("Write", tier1_executor.claude_tools(["read"], needs_drop=False))
+        self.assertIn("Write", tier1_executor.claude_tools(["read"], needs_drop=True))
+
+    def test_run_claude_command_and_stdin(self):
+        with unittest.mock.patch.object(tier1_executor.subprocess, "run") as run:
+            run.return_value = unittest.mock.Mock(
+                returncode=0, stderr="",
+                stdout=json.dumps({"subtype": "success", "is_error": False, "result": "ok",
+                                   "usage": {"input_tokens": 10, "cache_read_input_tokens": 5,
+                                             "output_tokens": 7}}))
+            ok, env, _ = tier1_executor.run_claude("/c", "claude-sonnet-5", pathlib.Path("/w"),
+                                                   "ТЕКСТ ЗАДАЧИ", "sys", ("Read", "Write"), 30)
+        self.assertTrue(ok)
+        self.assertEqual(env["usage"], {"input": 15, "output": 7})
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Write")
+        self.assertIn("Bash", argv[argv.index("--disallowedTools") + 1])
+        self.assertIn("WebFetch", argv[argv.index("--disallowedTools") + 1])
+        self.assertNotIn("ТЕКСТ ЗАДАЧИ", " ".join(argv))
+        self.assertEqual(run.call_args.kwargs["input"], "ТЕКСТ ЗАДАЧИ")
+        self.assertEqual(run.call_args.kwargs["cwd"], "/w")
+
+    def _cycle(self, tmp, claude_result, limit_active=False, claude_writes=True):
+        posted, calls = [], {"claude": 0, "openclaw": 0}
+        drop = self._drop(tmp)
+        def fake_claude(*a, **k):
+            calls["claude"] += 1
+            if claude_result and claude_writes:
+                drop.write_text("записка себе", encoding="utf-8")
+            return claude_result, ({"usage": {"input": 100, "output": 20}} if claude_result
+                                   else {"error": "limit"}), ""
+        def fake_openclaw(*a, **k):
+            calls["openclaw"] += 1
+            drop.write_text("записка от gemma", encoding="utf-8")
+            return True, {"usage": {"input": 50, "output": 10}}, ""
+        with unittest.mock.patch.object(tier1_executor, "_get", side_effect=self._get(limit_active)), \
+                unittest.mock.patch.object(tier1_executor, "run_claude", side_effect=fake_claude), \
+                unittest.mock.patch.object(tier1_executor, "run_openclaw", side_effect=fake_openclaw), \
+                unittest.mock.patch.object(tier1_executor, "_post",
+                                           side_effect=lambda u, b, **k: posted.append((u, b)) or {}):
+            rc = tier1_executor._run(self._args(tmp))
+        return rc, calls, posted
+
+    def test_claude_success_skips_fallback(self):
+        tmp = tempfile.mkdtemp(prefix="motus-t1c-")
+        try:
+            rc, calls, posted = self._cycle(tmp, claude_result=True)
+            self.assertEqual((rc, calls), (0, {"claude": 1, "openclaw": 0}))
+            llm = [b for u, b in posted if u.endswith("/llm_call")][0]
+            self.assertEqual(llm["model"], "claude-cli/claude-sonnet-5")
+            self.assertTrue([b for u, b in posted if u.endswith("/consummation")][0]["verified"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_claude_failure_falls_back_to_openclaw(self):
+        tmp = tempfile.mkdtemp(prefix="motus-t1c-")
+        try:
+            rc, calls, posted = self._cycle(tmp, claude_result=False)
+            self.assertEqual(calls, {"claude": 1, "openclaw": 1})
+            llm = [b for u, b in posted if u.endswith("/llm_call")][0]
+            self.assertEqual(llm["model"], "ollama/ge4b-heretic:latest")
+            self.assertTrue([b for u, b in posted if u.endswith("/consummation")][0]["verified"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_limit_block_goes_straight_to_fallback(self):
+        tmp = tempfile.mkdtemp(prefix="motus-t1c-")
+        try:
+            rc, calls, _ = self._cycle(tmp, claude_result=True, limit_active=True)
+            self.assertEqual(calls, {"claude": 0, "openclaw": 1})
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_persona_prompt_reads_soul_and_caps_size(self):
+        tmp = tempfile.mkdtemp(prefix="motus-t1c-")
+        try:
+            (pathlib.Path(tmp) / "SOUL.md").write_text("я — Грач", encoding="utf-8")
+            (pathlib.Path(tmp) / "IDENTITY.md").write_text("x" * 50000, encoding="utf-8")
+            sp = tier1_executor.persona_prompt(pathlib.Path(tmp))
+            self.assertIn("я — Грач", sp)
+            self.assertIn("оболочки", sp)
+            self.assertLess(len(sp), tier1_executor.PERSONA_MAX_CHARS + 2000)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestTier2Executor(unittest.TestCase):
     """Исполнитель доставки проактива: deploy/tier2_executor.py."""
 

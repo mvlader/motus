@@ -39,6 +39,11 @@ Environment="MOTUS_TIER1_OC_ARGS=--config /opt/motus-tier1/exec-config.json --lo
 # ge4b-heretic (E4B), а не g26-heretic — тот делит ПК с живым диалогом
 # (см. docs/04-model-l1.md, тот же вывод уже был сделан для L-1-сенсора).
 Environment=MOTUS_TIER1_MODEL=ollama/ge4b-heretic:latest
+# Основной путь (2026-09-15): claude -p на подписке, только файловые инструменты
+# (Read/Glob/Grep/Write/Edit) — ПК с ollama слишком часто выключен. Отказ Claude или
+# лимит на пределе → запасной путь выше (openclaw + ge4b-heretic). Пусто — только openclaw.
+Environment=MOTUS_TIER1_CLAUDE_MODEL=claude-sonnet-5
+Environment=MOTUS_TIER1_CLAUDE=/home/openclaw/.npm-global/bin/claude
 Environment=MOTUS_TIER1_TASK_TIMEOUT=420
 ExecStart=/usr/bin/python3 /opt/motus-tier1/tier1_executor.py
 # Фоновая работа не должна греть Pi в ущерб живому разговору и не должна

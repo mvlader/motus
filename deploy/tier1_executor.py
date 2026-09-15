@@ -61,6 +61,31 @@ DEFAULT_OPENCLAW = os.environ.get(
 #: `--config <урезанный.json>` вместо `--isolated`).
 DEFAULT_OC_ARGS = os.environ.get("MOTUS_TIER1_OC_ARGS", "--isolated --local-model-lean")
 
+#: Основной путь с 2026-09-15 — Claude через `claude -p` на подписке: ПК с ollama
+#: слишком часто выключен, и фоновые акты просто не случались. openclaw + локальная
+#: модель остаётся запасным путём (отказ Claude, лимит на пределе).
+#:
+#: Почему не `openclaw agent exec` с рантаймом claude-cli: там список инструментов
+#: exec-конфига не применяется, и ход получает весь набор Claude Code — Bash,
+#: WebFetch, WebSearch, PushNotification, RemoteTrigger, SendMessage (проверено
+#: 2026-09-15 на openclaw 2026.9.4). Прямой вызов даёт точный список через --tools.
+DEFAULT_CLAUDE = os.environ.get("MOTUS_TIER1_CLAUDE", "/home/openclaw/.npm-global/bin/claude")
+#: Только файлы: ни оболочки, ни сети, ни одного канала отправки.
+CLAUDE_READ_TOOLS = ("Read", "Glob", "Grep")
+CLAUDE_WRITE_TOOLS = ("Write", "Edit")
+CLAUDE_DENIED_TOOLS = ("Bash", "WebFetch", "WebSearch", "PushNotification",
+                       "RemoteTrigger", "SendMessage", "Agent", "CronCreate", "CronDelete")
+#: Файлы личности из workspace — через openclaw они подаются сами, `claude -p` их не
+#: читает. Потолок размера — чтобы разросшийся файл не съел лимит подписки.
+PERSONA_FILES = ("SOUL.md", "IDENTITY.md")
+PERSONA_MAX_CHARS = 16000
+
+CLAUDE_FRAME = """Это фоновый ход: ты сама с собой, в тишине, без собеседника. Ниже — кто ты.
+Инструменты — только чтение и запись файлов в текущем каталоге (workspace); оболочки,
+сети и каналов отправки нет, и не пытайся их искать. Память — markdown-файлы
+MEMORY.md и memory/ в этом каталоге: читай их Read/Grep, если нужно.
+"""
+
 #: Преамбула жёстче самого акта — эти границы модель не вправе переступить,
 #: что бы ни говорил текст ниже. Два варианта: с файлом-следом (большинство
 #: типов консумации) и без (reflection — показывать нечего, и это нормально).
@@ -158,6 +183,92 @@ def run_openclaw(
     return (not is_error), env, proc.stdout
 
 
+def claude_tools(task_tools, needs_drop: bool) -> Tuple[str, ...]:
+    """Классы гейта → инструменты Claude Code. Запись — только если гейт её
+    разрешает или акт обязан оставить файл-след."""
+    tools = list(CLAUDE_READ_TOOLS)
+    if needs_drop or "write" in (task_tools or ()):
+        tools += CLAUDE_WRITE_TOOLS
+    return tuple(tools)
+
+
+def persona_prompt(workspace: Path) -> str:
+    parts = [CLAUDE_FRAME]
+    budget = PERSONA_MAX_CHARS
+    for name in PERSONA_FILES:
+        try:
+            text = (workspace / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        text = text[:budget]
+        budget -= len(text)
+        parts.append(f"\n--- {name} ---\n{text}")
+        if budget <= 0:
+            break
+    return "".join(parts)
+
+
+def run_claude(
+    claude: str,
+    model: str,
+    cwd: Path,
+    prompt: str,
+    system_prompt: str,
+    tools: Tuple[str, ...],
+    timeout_s: int,
+) -> Tuple[bool, Dict[str, Any], str]:
+    """Один ход `claude -p` строго с перечисленными инструментами. Промпт — через stdin."""
+    cmd = [
+        claude, "-p",
+        "--model", model,
+        "--tools", ",".join(tools),
+        "--disallowedTools", ",".join(CLAUDE_DENIED_TOOLS),
+        "--permission-mode", "acceptEdits",
+        "--strict-mcp-config",
+        "--setting-sources", "",
+        "--no-session-persistence",
+        "--system-prompt", system_prompt,
+        "--output-format", "json",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd, input=prompt, capture_output=True, text=True, cwd=str(cwd),
+            timeout=timeout_s + 60,
+            env={**os.environ, "HOME": os.path.expanduser("~openclaw")
+                 if os.path.isdir(os.path.expanduser("~openclaw")) else os.environ.get("HOME", "/")},
+        )
+    except subprocess.TimeoutExpired:
+        return False, {"error": "subprocess_timeout"}, ""
+    except OSError as exc:
+        return False, {"error": f"spawn_failed: {exc}"}, ""
+    try:
+        out = json.loads(proc.stdout)
+    except ValueError:
+        return False, {"error": f"not_json (код {proc.returncode}): {(proc.stderr or proc.stdout)[-200:]}"}, proc.stdout
+    usage = out.get("usage") or {}
+    env = {
+        "usage": {
+            "input": int(usage.get("input_tokens") or 0)
+                     + int(usage.get("cache_read_input_tokens") or 0)
+                     + int(usage.get("cache_creation_input_tokens") or 0),
+            "output": int(usage.get("output_tokens") or 0),
+        },
+        "denials": out.get("permission_denials") or [],
+    }
+    is_error = bool(out.get("is_error") or out.get("subtype") != "success" or proc.returncode != 0)
+    if is_error:
+        env["error"] = str(out.get("result") or out.get("subtype"))[:300]
+    return (not is_error), env, proc.stdout
+
+
+def _limit_blocked(base: str) -> bool:
+    """Лимит Claude на пределе — не тратить его на фоновый акт, сразу запасной путь."""
+    try:
+        return bool((_get(f"{base}/state/card").get("limit_block") or {}).get("active"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return False
+
+
 def _tokens(env: Dict[str, Any]) -> Tuple[int, int]:
     for key in ("usage", "tokens", "tokenUsage"):
         u = env.get(key)
@@ -238,7 +349,11 @@ def main(argv=None) -> int:
     ap.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     ap.add_argument("--openclaw", default=DEFAULT_OPENCLAW)
     ap.add_argument("--oc-args", default=DEFAULT_OC_ARGS)
-    ap.add_argument("--model", default=os.environ.get("MOTUS_TIER1_MODEL") or None)
+    ap.add_argument("--model", default=os.environ.get("MOTUS_TIER1_MODEL") or None,
+                    help="модель запасного пути (openclaw agent exec)")
+    ap.add_argument("--claude", default=DEFAULT_CLAUDE)
+    ap.add_argument("--claude-model", default=os.environ.get("MOTUS_TIER1_CLAUDE_MODEL") or None,
+                    help="основной путь: claude -p с этой моделью; пусто — только openclaw")
     ap.add_argument("--task-timeout", type=int,
                     default=int(os.environ.get("MOTUS_TIER1_TASK_TIMEOUT", "420")))
     ap.add_argument("--dry-run", action="store_true",
@@ -316,16 +431,33 @@ def _run(args) -> int:
         return 0
 
     started = time.time()
-    ok, env, raw = run_openclaw(
-        args.openclaw, args.oc_args, args.workspace, msg_file,
-        args.task_timeout, args.model,
-    )
+    ok, env, used = False, {}, ""
+    claude_model = getattr(args, "claude_model", None)
+    if claude_model:
+        if _limit_blocked(base):
+            print("tier1: лимит Claude на пределе — сразу запасной путь", file=sys.stderr)
+        else:
+            used = f"claude-cli/{claude_model}"
+            ok, env, _raw = run_claude(
+                getattr(args, "claude", DEFAULT_CLAUDE), claude_model, args.workspace,
+                prompt, persona_prompt(args.workspace),
+                claude_tools(tools, needs_drop=drop is not None), args.task_timeout,
+            )
+            if not ok:
+                print(f"tier1: {tid} Claude не справился ({env.get('error')}) — запасной путь",
+                      file=sys.stderr)
+    if not ok:
+        used = args.model or "openclaw/agent-exec"
+        ok, env, _raw = run_openclaw(
+            args.openclaw, args.oc_args, args.workspace, msg_file,
+            args.task_timeout, args.model,
+        )
     elapsed = time.time() - started
     verified, why = verify(task.get("consummation", {}), drop, started, ok)
     tin, tout = _tokens(env)
 
     print(
-        f"tier1: {tid} drive={task.get('drive')} ok={ok} verified={verified} "
+        f"tier1: {tid} drive={task.get('drive')} model={used} ok={ok} verified={verified} "
         f"({why}) {elapsed:.0f}s tokens={tin}+{tout}",
         file=sys.stderr,
     )
@@ -346,7 +478,7 @@ def _run(args) -> int:
     try:
         if tin or tout:
             _post(f"{base}/llm_call", {
-                "model": args.model or "openclaw/agent-exec", "purpose": "task",
+                "model": used, "purpose": "task",
                 "tokens_in": tin, "tokens_out": tout, "template_id": tid,
             })
         _post(f"{base}/consummation", consum_body)
