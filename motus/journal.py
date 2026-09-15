@@ -19,6 +19,10 @@ KINDS = (
     "appraisal_invalid", "error",
     # Отложенная валидация FEAR (2026-09-14).
     "validation_scheduled", "validation_confirmed", "consummation_invalidated",
+    # Правки состояния, которые раньше шли мимо журнала и ломали реплей (2026-09-15):
+    # возврат токена, протухание задач при опросе очереди, подмена репертуара
+    # снапшотом с диска или ночным курированием.
+    "refund", "task_expired", "repertoire",
 )
 
 

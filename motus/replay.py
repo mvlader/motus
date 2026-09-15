@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -43,6 +44,10 @@ class ReplayResult:
     events: int
     divergences: List[Divergence] = field(default_factory=list)
     final: Optional[Dict[str, Any]] = None
+    #: seq записей boot старого формата (до 2026-09-15): без state_full реплей
+    #: вынужден стартовать с State.initial(), а демон поднимал state.json —
+    #: расхождение после такого boot ожидаемо и не означает бага ядра.
+    legacy_boots: List[int] = field(default_factory=list)
 
     @property
     def deterministic(self) -> bool:
@@ -51,6 +56,13 @@ class ReplayResult:
 
 def replay(cfg: Dict[str, Any], records: Iterable[Dict[str, Any]],
            tolerance: float = 1e-9) -> ReplayResult:
+    """Прогнать журнал через ядро и сравнить снимки.
+
+    Воспроизводится всё, что меняет состояние демона: события, тики, консумации
+    (с outcome отложенной валидации), сон, возврат токена, протухание задач при
+    опросе очереди и подмена репертуара. Каждый boot стартует с полного вектора
+    из записи (state_full) — ровно с того, что демон поднял из state.json.
+    """
     recs = sorted(records, key=lambda r: r["seq"])
     if not recs:
         return ReplayResult(0, 0)
@@ -63,22 +75,40 @@ def replay(cfg: Dict[str, Any], records: Iterable[Dict[str, Any]],
 
     for rec in recs:
         kind, t = rec["kind"], rec["t"]
+        p = rec.get("payload", {})
         clock.t = t
         if kind == "boot":
-            st = State.initial(cfg, t)
+            clock.tz_offset_s = float(p.get("tz_offset_s", clock.tz_offset_s))
+            full = p.get("state_full")
+            if full is not None:
+                st = State.from_dict(copy.deepcopy(full))
+            else:
+                st = State.initial(cfg, t)
+                res.legacy_boots.append(rec["seq"])
             engine = Engine(cfg, clock, NullJournal(), st)
             continue
         if engine is None:
             continue
 
         if kind == "event":
-            if "kind" not in rec["payload"]:
-                continue  # служебные записи вроде initiation_unanswered
-            engine.submit_event(Event.from_dict(rec["payload"]))
+            if "kind" not in p or "t" not in p:
+                # Служебные записи вроде initiation_unanswered: их порождает сам
+                # tick (check_unanswered), повторная подача задвоила бы эффект.
+                continue
+            engine.submit_event(Event.from_dict(p))
             res.events += 1
         elif kind == "consummation":
-            p = rec["payload"]
-            engine.consummate(p["template_id"], p["verified"], p.get("cost", 0.0))
+            engine.consummate(p["template_id"], p["verified"], p.get("cost", 0.0),
+                              outcome=p.get("outcome"))
+        elif kind == "sleep":
+            if not p.get("deferred"):
+                engine.maybe_sleep(force=True)
+        elif kind == "refund":
+            engine.refund_initiation()
+        elif kind == "task_expired":
+            engine.peek_task()
+        elif kind == "repertoire":
+            engine.set_repertoire(copy.deepcopy(p["data"]), p.get("source", "replay"))
         elif kind == "tick":
             engine.tick(t)
             res.ticks += 1

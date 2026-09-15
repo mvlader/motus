@@ -185,21 +185,20 @@
     "_note_risk": "Зависимость от LAN-ПК остаётся для КАЧЕСТВА сигнала (словарь заметно грубее модели), но не для его наличия — тишины при отказе больше нет. POST /event с текстом блокируется на время инференса — при холодном старте ollama (~50с) это заметно в плагине openclaw (docs/04-model-l1.md, «Латентность»); словарный откат этой задержки не несёт — таймаут уже истёк к моменту отката.",
     "lexical_strict": false,
     "model_fallback": "lexical",
-    "api": "ollama",
-    "base_url": "http://192.168.2.27:11434",
-    "model": "ge4b-heretic:latest",
+    "api": "claude_cli",
+    "model": "claude-sonnet-5",
     "timeout_s": 55.0,
-    "num_predict": 96,
-    "temperature": 0.0
+    "claude_bin": "/opt/claude/claude",
+    "effort": "low",
+    "_note_claude": "2026-09-15, решение оператора: L-1 — claude-sonnet-5 через `claude -p` на подписке Claude Code (не API-ключ). Токен — CLAUDE_CODE_OAUTH_TOKEN из /etc/motus/claude.env (`claude setup-token`). Расход — общий 5-часовой лимит подписки, ~1 тыс. токенов на сообщение (свой короткий системный промпт вместо штатного). Без токена или при отказе — словарный откат (model_fallback=lexical). Прежние замеры ниже — про gemma/ollama."
   },
   "curation": {
-    "enabled": false,
-    "_note": "Ночной цикл, шаг 2 (docs/01-structure.md §7, motus/curator.py): модель раз в сутки, после успешного (не отложенного) сна, смотрит на efficacy репертуара и вправе переписать prompt/rationale, добавить или архивировать шаблон — в пределах QUOTA_PER_NIGHT=3 и жёстко суженного словаря значений (Repertoire.apply_edits проверяет каждую правку кодом, не доверяя модели). enabled=false по умолчанию — новая, ещё не обкатанная на живых данных возможность; включать осознанно, посмотрев сперва на dry-run/тесты. Один раз в сутки — задержка 30-60с не критична, можно модель посильнее, чем у L-1.",
-    "api": "ollama",
-    "base_url": "http://192.168.2.27:11434",
-    "model": "ge4b-heretic:latest",
-    "timeout_s": 60.0,
-    "num_predict": 800,
-    "temperature": 0.2
+    "enabled": true,
+    "_note": "Ночной цикл, шаг 2 (docs/01-structure.md §7, motus/curator.py): модель раз в сутки, после успешного сна, смотрит на efficacy репертуара и вправе переписать prompt/rationale, добавить или архивировать шаблон — не больше QUOTA_PER_NIGHT=3 правок и только из суженного словаря значений (Repertoire.apply_edits проверяет каждую правку кодом). Включено 2026-09-15 решением оператора, модель claude-sonnet-5 через `claude -p` (подписка). Отказ модели — цикл пропускается.",
+    "api": "claude_cli",
+    "model": "claude-sonnet-5",
+    "timeout_s": 180.0,
+    "claude_bin": "/opt/claude/claude",
+    "effort": "medium"
   }
 }

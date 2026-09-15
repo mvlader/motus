@@ -131,7 +131,26 @@ def make_sensor(cfg: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:
         return llamacpp_sensor(cfg)
     if api == "ollama":
         return ollama_sensor(cfg)
-    raise ValueError(f"appraisal.api: неизвестное значение {api!r} (llamacpp|ollama)")
+    if api == "claude_cli":
+        return claude_cli_sensor(cfg)
+    raise ValueError(f"appraisal.api: неизвестное значение {api!r} (llamacpp|ollama|claude_cli)")
+
+
+def claude_cli_sensor(cfg: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:
+    """L-1 через Claude (`claude -p`, подписка). Тот же SENSOR_PROMPT и та же схема,
+    что у локальных рантаймов; Appraisal.parse() остаётся последним рубежом."""
+    claude_bin = cfg.get("claude_bin", "/opt/claude/claude")
+    model = cfg["model"]
+    timeout_s = float(cfg.get("timeout_s", 55.0))
+    effort = cfg.get("effort", "low")
+
+    def sensor(text: str) -> Dict[str, Any]:
+        return modelcall.claude_cli_complete(
+            claude_bin, model, SENSOR_PROMPT + text, Appraisal.json_schema(),
+            timeout_s=timeout_s, effort=effort,
+        )
+
+    return sensor
 
 
 def llamacpp_sensor(cfg: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:

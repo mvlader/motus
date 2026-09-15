@@ -88,10 +88,14 @@ class Engine:
         #: run_ticker зовёт maybe_sleep() каждые 45–600 с, и незатухающая петля
         #: иначе засыпала бы журнал записями "sleep deferred".
         self._sleep_deferred_logged = False
+        # state_full — полный вектор, а не округлённый snapshot: демон стартует
+        # с state.json, и реплей обязан стартовать ровно с того же, иначе он
+        # расходится с первого же тика после любого рестарта.
         self.journal.write(
             "boot", self.state.t,
             {"version": cfg.get("schema"),
-             "tz_offset_s": getattr(clock, "tz_offset_s", 0.0)},
+             "tz_offset_s": getattr(clock, "tz_offset_s", 0.0),
+             "state_full": self.state.to_dict()},
             self.state.snapshot(),
         )
 
@@ -238,7 +242,7 @@ class Engine:
             "consummation",
             self.state.t,
             {"template_id": template_id, "drive": task.drive, "verified": verified,
-             "delta": round(delta, 5), "cost": cost},
+             "delta": round(delta, 5), "cost": cost, "outcome": outcome},
             self.state.snapshot(),
         )
         return delta
@@ -260,6 +264,23 @@ class Engine:
         st = self.state
         st.tokens = min(self.cfg["budget"]["capacity"], st.tokens + 1.0)
         st.initiation_pending = False
+        self.journal.write("refund", st.t, {}, st.snapshot())
+
+    def peek_task(self) -> Optional[Task]:
+        """rep.peek() с журналом: протухание задач штрафует привыканием, то есть
+        меняет состояние — мимо журнала реплей этого не видит."""
+        st = self.state
+        before = len(self.rep.queue)
+        self.rep.expire(st.t, st)
+        expired = before - len(self.rep.queue)
+        if expired:
+            self.journal.write("task_expired", st.t, {"n": expired}, st.snapshot())
+        return self.rep.queue[0] if self.rep.queue else None
+
+    def set_repertoire(self, data: Dict[str, Any], source: str) -> None:
+        """Подменить данные репертуара (снапшот с диска, курирование) с записью в журнал."""
+        self.rep.data = data
+        self.journal.write("repertoire", self.state.t, {"source": source, "data": data})
 
     # ------------------------------------------------------------------- тик
 

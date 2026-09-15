@@ -94,7 +94,10 @@ class Service:
         sensor = None
         if cfg.get("appraisal", {}).get("mode") == "model":
             sensor = appraisal.make_sensor(cfg["appraisal"])
-            self._warm_up_sensor(sensor, self.journal)
+            # Прогревать нужно только локальную модель (загрузка весов). Claude
+            # греть нечем, а каждый холостой вызов — расход лимита подписки.
+            if cfg["appraisal"].get("api", "llamacpp") != "claude_cli":
+                self._warm_up_sensor(sensor, self.journal)
         # sensor=None → Engine берёт appraisal.mode из конфига (lexical|off).
         self.engine = Engine(cfg, self.clock, self.journal, st, sensor=sensor)
         self._load_repertoire()  # поверх бутстрап-дефолта из config/repertoire.json
@@ -185,7 +188,7 @@ class Service:
             except OSError:
                 pass
             return
-        self.engine.rep.data = data
+        self.engine.set_repertoire(data, "snapshot")
 
     def save_repertoire(self) -> None:
         self.engine.rep.save(self.repertoire_path)
@@ -204,6 +207,7 @@ class Service:
         self.journal.write("curation", self.engine.state.t,
                            {"proposed": len(edits), **result})
         if result["applied"]:
+            self.engine.set_repertoire(self.engine.rep.data, "curation")
             self.save_repertoire()
 
     # ------------------------------------------------------------- фоновый цикл
@@ -336,7 +340,7 @@ class Handler(BaseHTTPRequestHandler):
                 # кладёт в очередь независимый фоновый цикл (run_ticker) между
                 # опросами исполнителя. peek() отдаёт то, что уже лежит там и
                 # ждёт (см. repertoire.Repertoire.peek).
-                task = d.task or svc.engine.rep.peek(svc.engine.state.t, svc.engine.state)
+                task = d.task or svc.engine.peek_task()
                 return self._send(200, {"task": task.to_dict() if task else None,
                                         "tier": d.tier})
         if path == "/initiate/pending":

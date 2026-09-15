@@ -9,7 +9,7 @@
 и git не расходятся молча: перед записью меню сверяет деплой с репозиторием.
 
 Что меню не делает никогда:
-  * не пишет state.json боевого демона (§4.1) — живые драйвы не «настройка»;
+  * не пишет state.json демона (§4.1) — живые драйвы не «настройка»;
   * не трогает gates.REGIME_POLICY (§4.6) — это код, не конфиг;
   * не делает вид, что правка действует до рестарта motusd (§4.5).
 
@@ -24,7 +24,6 @@ import difflib
 import json
 import math
 import os
-import random
 import shlex
 import shutil
 import subprocess
@@ -39,7 +38,6 @@ sys.path.insert(0, REPO)
 from motus import config, replay            # noqa: E402
 from motus.config import ConfigError         # noqa: E402
 from motus.events import Event               # noqa: E402
-from motus.state import State, _assert_finite  # noqa: E402
 
 REPO_CONFIG = os.path.join(REPO, "config")
 
@@ -156,8 +154,7 @@ class Target:
 
     def write_file(self, path: str, data: str) -> None:
         """Атомарно: временный файл рядом → mv. Владелец и права — как у старого файла."""
-        if os.path.basename(path) in STATE_FILENAMES and not path.startswith(SANDBOX_PREFIX):
-            # Единственное исключение — засев песочницы до её старта (§3.5).
+        if os.path.basename(path) in STATE_FILENAMES:
             raise PermissionError(f"motusctl не пишет {path}: состоянием владеет демон (§4.1)")
         script = ('set -e; tmp=$(mktemp "$1.tmp.XXXXXX"); cat > "$tmp"; '
                   'if [ -e "$1" ]; then chown --reference="$1" "$tmp" 2>/dev/null || true; '
@@ -182,7 +179,6 @@ def _current_user() -> str:
 # ============================================================== конфиг: чистые функции
 
 STATE_FILENAMES = frozenset(("state.json",))
-SANDBOX_PREFIX = "/tmp/motus-sandbox."
 
 
 def stamp(now: Optional[float] = None) -> str:
@@ -352,8 +348,7 @@ AGENT_SECTIONS: List[Tuple[str, str, str]] = [
     ("Бюджет инициаций", "budget", "токены, рефрактерность, штраф за молчание"),
     ("Сон", "sleep", "ночной цикл консолидации"),
     ("Вербализатор", "verbalizer", "бюджет карточки"),
-    ("L-1 оценка текста", "appraisal", "чем оценивается текст пользователя"),
-    ("Самокурирование", "curation", "ночная правка репертуара моделью — НЕ ОБКАТАНО"),
+    ("Самокурирование", "curation", "ночная правка репертуара моделью: до 3 правок, каждую проверяет код"),
 ]
 
 KEY_HELP: Dict[str, str] = {
@@ -375,8 +370,34 @@ KEY_HELP: Dict[str, str] = {
     "verbalizer.lexicon": "язык карточки для модели: ru|en",
     "verbalizer.max_chars": "бюджет карточки, символов",
     "appraisal.mode": "model|lexical|off",
+    "appraisal.api": "llamacpp|ollama|claude_cli",
+    "appraisal.model": "модель L-1 (для claude_cli — например claude-sonnet-5)",
+    "appraisal.model_fallback": "что при отказе модели: null|lexical",
+    "curation.api": "llamacpp|ollama|claude_cli",
+    "curation.model": "модель курирования",
     "curation.enabled": "право агента самому править свой репертуар",
 }
+
+#: Статус: (путь, пояснение) — только показ, правка идёт через свои разделы.
+STATUS_KEYS: List[Tuple[str, str]] = [
+    ("budget.initiation_enabled", "может ли бот сам писать первым (Tier 2)"),
+    ("heartbeat.theta_act", "порог активации для инициации контакта: выше — пишет реже"),
+    ("heartbeat.theta_task", "порог активации для фоновой задачи (Tier 1)"),
+    ("heartbeat.task_min_interval_s", "не чаще одной фоновой задачи за столько секунд"),
+    ("separation.grace_s", "сколько секунд молчания до начала роста PANIC"),
+    ("separation.max", "насколько сильно может вырасти PANIC от разлуки"),
+    ("boredom.grace_s", "сколько секунд без нового входа до начала скуки (SEEKING)"),
+    ("budget.refractory_s", "пауза после каждой инициации, с"),
+    ("budget.capacity", "сколько инициаций может накопиться про запас"),
+    ("budget.quiet_hours.enabled", "тихие часы: в окне бот не пишет первым"),
+    ("budget.quiet_hours.start_hour", "начало тихих часов"),
+    ("budget.quiet_hours.end_hour", "конец тихих часов"),
+    ("clock.timezone", "часовой пояс, в котором считаются часы суток"),
+    ("thresholds.dwell_s", "минимальное время в режиме до смены, с"),
+    ("verbalizer.lexicon", "язык карточки для модели"),
+    ("curation.enabled", "ночное самокурирование репертуара"),
+    ("curation.model", "модель самокурирования"),
+]
 
 USER_KEYS = [
     "budget.quiet_hours.enabled",
@@ -385,14 +406,13 @@ USER_KEYS = [
     "budget.quiet_hours.grace_after_contact_s",
     "clock.timezone",
 ]
-INTERFACE_KEYS = ["verbalizer.lexicon"]
 
 #: Ключи, правка которых требует явного подтверждения с объяснением.
 DANGEROUS: Dict[str, str] = {
     "curation.enabled": (
-        "Ночное самокурирование даёт агенту право САМОМУ править свой репертуар\n"
-        "(в пределах квоты и суженного словаря, repertoire.apply_edits).\n"
-        "Ни разу не обкатано на живых данных. Сначала стоит посмотреть dry-run/тесты."
+        "Ночное самокурирование даёт агенту право САМОМУ править свой репертуар:\n"
+        "не больше 3 правок за ночь, только из суженного словаря значений —\n"
+        "каждую правку проверяет код (repertoire.apply_edits), а не модель."
     ),
     "budget.initiation_enabled": "Включает/выключает проактивные сообщения бота (Tier 2).",
 }
@@ -647,71 +667,28 @@ def records_from_boot(files: Sequence[Tuple[str, str]], day: str) -> List[Dict[s
     return day_recs  # раньше boot нет — реплей начнётся с первого boot внутри дня
 
 
-def describe_divergences(recs: Sequence[Dict[str, Any]], divs, all_divs=None) -> List[str]:
-    """Сводка расхождений дня по тикам + подсказка о причине по САМОМУ первому
-    расхождению прогона (all_divs): реплей мог начаться с boot в предыдущий день."""
+def describe_divergences(divs, all_divs=None, legacy_boots: Sequence[int] = ()) -> List[str]:
+    """Сводка расхождений дня по тикам + диагноз по САМОМУ первому расхождению
+    прогона (all_divs): реплей мог начаться с boot в предыдущий день."""
     by_seq: Dict[int, list] = {}
     for dv in divs:
         by_seq.setdefault(dv.seq, []).append(dv)
     seqs = sorted(by_seq)
     out = [f"расхождений: {len(divs)} полей в {len(seqs)} тиках"]
-    # Первый расходящийся тик сразу после boot — почти наверняка не баг ядра:
-    # replay() начинает каждый boot с State.initial(), а демон при старте поднял
-    # state.json, и эти состояния разные с первой же секунды.
-    order = [r for r in recs if r.get("kind") in ("boot", "tick")]
     first = min(dv.seq for dv in (all_divs or divs))
-    prev = None
-    for r in order:
-        if r["seq"] == first:
-            break
-        prev = r
-    if prev is not None and prev.get("kind") == "boot":
-        when = _dt.datetime.fromtimestamp(prev["t"]).strftime("%Y-%m-%d %H:%M")
-        out.append(f"⚠ первое расхождение — на первом тике после boot ({when}): реплей стартует boot с")
-        out.append("  начального состояния, а демон поднял state.json. Это ограничение replay.py,")
-        out.append("  а не обязательно баг детерминизма; дальше расхождение тянется по инерции.")
+    legacy_before = [b for b in legacy_boots if b < first]
+    if legacy_before:
+        out.append(f"⚠ журнал старого формата: boot seq {legacy_before[-1]} без полного состояния")
+        out.append("  (до 2026-09-15). Реплей стартовал с начального вектора, а демон — со")
+        out.append("  state.json, поэтому расхождение ожидаемо и о детерминизме ничего не говорит.")
     else:
-        out.append("первое расхождение — не на старте: баг детерминизма, правка состояния мимо")
-        out.append("журнала или конфиг, отличный от того, с которым демон работал в этот день.")
+        out.append("⚠ boot полного формата, а реплей всё равно разошёлся: баг детерминизма, правка")
+        out.append("  состояния мимо журнала или конфиг, отличный от того, с которым работал демон.")
     for seq in seqs[:8]:
         g = by_seq[seq]
         when = _dt.datetime.fromtimestamp(g[0].t).strftime("%H:%M:%S")
         fields = ", ".join(f"{dv.field} {dv.expected}≠{dv.got}" for dv in g[:4])
         out.append(f"  seq {seq} {when}: {fields}" + (" …" if len(g) > 4 else ""))
-    return out
-
-
-# ============================================================== песочница (§3.5)
-
-SANDBOX_TIMINGS = {
-    "heartbeat.task_min_interval_s": 60,
-    "thresholds.dwell_s": 30,
-    "budget.refractory_s": 120,
-}
-
-
-def seed_state(cfg: Dict[str, Any], drives: Dict[str, float], now: float) -> Dict[str, Any]:
-    """Засеянное состояние для песочницы: клип в [0,1], NaN/Inf отвергаются."""
-    st = State.initial(cfg, now)
-    for name, v in drives.items():
-        if name not in config.DRIVES:
-            raise ValueError(f"неизвестный драйв {name}")
-        v = float(v)
-        if not math.isfinite(v):
-            raise ValueError(f"{name}: нечисловое значение")
-        st.drives[name] = min(1.0, max(0.0, v))
-    d = st.to_dict()
-    _assert_finite(d)
-    return d
-
-
-def parse_assignments(text: str) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for kv in text.replace(",", " ").split():
-        if "=" not in kv:
-            raise ValueError(f"{kv!r}: ожидается ИМЯ=значение")
-        k, v = kv.split("=", 1)
-        out[k.strip()] = v.strip()
     return out
 
 
@@ -854,24 +831,20 @@ class App:
             if changes:
                 print(f"несохранённых изменений: {len(changes)}")
             items = [
-                "Агент — гомеостат (§3.1)",
-                "Пользователь: тихие часы, часовой пояс",
-                "Интерфейс: язык карточки",
-                "Тесты драйвов — реплей-стенд (ничего не пишет)",
-                "Изолированный инстанс (песочница)",
-                "openclaw: плагин motus, гейтвей",
-                f"Сохранить и применить изменения ({len(changes)})",
-                "Отменить несохранённые изменения",
-                "Настройки меню («запуск через»)",
+                "Агент",
+                "Пользователь",
+                "Тесты драйвов",
+                "OpenClaw",
+                f"Сохранить и применить ({len(changes)})",
+                "Отменить изменения",
             ]
             i = choose("MOTUS", items, zero="выход")
             if i is None:
                 if changes and not confirm("Есть несохранённые изменения. Выйти без сохранения?"):
                     continue
                 return
-            [self.menu_agent, self.menu_user, self.menu_interface, self.menu_replay,
-             self.menu_sandbox, self.menu_openclaw, self.save_flow, self.discard,
-             self.menu_settings][i]()
+            [self.menu_agent, self.menu_user, self.menu_replay, self.menu_openclaw,
+             self.save_flow, self.discard][i]()
 
     def discard(self) -> None:
         self.pending = copy.deepcopy(self.base)
@@ -881,10 +854,15 @@ class App:
 
     def menu_agent(self) -> None:
         while True:
-            i = choose("Агент — гомеостат", [f"{t:<20} {d}" for t, _, d in AGENT_SECTIONS])
+            labels = ["Статус               главное одним экраном + L-1 оценка текста"]
+            labels += [f"{t:<20} {d}" for t, _, d in AGENT_SECTIONS]
+            i = choose("Агент", labels)
             if i is None:
                 return
-            title, prefix, _ = AGENT_SECTIONS[i]
+            if i == 0:
+                self.menu_status()
+                continue
+            title, prefix, _ = AGENT_SECTIONS[i - 1]
             if prefix == "drives":
                 self.menu_drives()
             else:
@@ -908,13 +886,51 @@ class App:
             n = names[i]
             self.edit_keys(f"Драйв {n}", [p for p, _ in leaves(self.pending["drives"][n], f"drives.{n}")])
 
-    def menu_user(self) -> None:
-        self.edit_keys("Пользователь", USER_KEYS)
+    def menu_status(self) -> None:
+        while True:
+            hr("Статус")
+            raw = self.admin_get("/state/raw") or {}
+            if raw:
+                drives = " ".join(f"{k}={v:.2f}" for k, v in raw.get("drives", {}).items())
+                print(f"сейчас: режим {raw.get('regime')}; {drives}")
+            else:
+                print("сейчас: живое состояние недоступно (админ-сокет не ответил)")
+            print()
+            for path, why in STATUS_KEYS:
+                val = get_path(self.pending, path) if has_path(self.pending, path) else "<не задано>"
+                mark = " *" if has_path(self.base, path) and get_path(self.base, path) != val else ""
+                print(f"  {path:<34} = {fmt_val(val):<16}{mark} {why}")
+            ap = self.pending.get("appraisal", {})
+            print(f"\n  L-1: режим {ap.get('mode')}, {ap.get('api')} / {ap.get('model')}, "
+                  f"при отказе — {ap.get('model_fallback')}")
+            print("  (* — изменено, не сохранено)")
+            i = choose("Статус", ["L-1 оценка текста — изменить"])
+            if i is None:
+                return
+            self.edit_keys("L-1 оценка текста",
+                           [p for p, _ in leaves(self.pending["appraisal"], "appraisal")])
 
-    def menu_interface(self) -> None:
-        print("\nЯзык лексикона — язык, на котором карточка говорит с МОДЕЛЬЮ (внутренняя речь бота).")
-        print("Меню motusctl пока только на русском.")
-        self.edit_keys("Интерфейс", INTERFACE_KEYS)
+    def menu_user(self) -> None:
+        while True:
+            labels = []
+            for p in USER_KEYS:
+                cur = get_path(self.pending, p) if has_path(self.pending, p) else "<не задано>"
+                was = get_path(self.base, p) if has_path(self.base, p) else "<не задано>"
+                mark = " *" if cur != was else ""
+                labels.append(f"{p:<44} = {fmt_val(cur)}{mark}   — {help_for(p)}")
+            lex = config.lexicon_name(self.pending)
+            labels.append(f"Язык карточки ({lex})                        — язык, на котором карточка говорит с моделью")
+            labels.append(f"Запуск через (motus: {fmt_val(self.s['motus_via'])}, "
+                          f"openclaw: {fmt_val(self.s['openclaw_via'])})")
+            i = choose("Пользователь", labels)
+            if i is None:
+                return
+            if i < len(USER_KEYS):
+                self.edit_one(USER_KEYS[i])
+            elif i == len(USER_KEYS):
+                self.edit_one("verbalizer.lexicon")
+            else:
+                self.menu_settings()
 
     def edit_keys(self, title: str, paths: List[str]) -> None:
         while True:
@@ -1078,7 +1094,7 @@ class App:
         print("\nВсё здесь работает на копии конфига в памяти и виртуальных часах: ни state.json,")
         print("ни config/ не пишутся. Берётся текущий конфиг ВМЕСТЕ с несохранёнными правками.")
         while True:
-            i = choose("Реплей-стенд", [
+            i = choose("Тесты драйвов", [
                 "Сценарий молчания",
                 "Сценарий потока событий",
                 "Подбор параметра (sweep)",
@@ -1198,137 +1214,8 @@ class App:
         if not divs:
             print(f"расхождений за {day} нет — детерминизм цел")
             return
-        for line in describe_divergences(recs, divs, r.divergences):
+        for line in describe_divergences(divs, r.divergences, r.legacy_boots):
             print(line)
-
-    # ---------------------------------------------------------------- песочница
-
-    def menu_sandbox(self) -> None:
-        tgt = self.motus
-        s = self.s
-        print("\nПесочница: второй motusd со своим config/var/портом/сокетом. Боевой демон и его")
-        print("state.json не трогаются вообще (ни stop, ни pkill).")
-        cfg = copy.deepcopy(self.pending)
-        print("\nТайминги (иначе ждать десятки минут):")
-        for p, suggested in SANDBOX_TIMINGS.items():
-            cur = get_path(cfg, p)
-            v = ask(f"  {p} (сейчас {cur})", str(suggested))
-            set_path(cfg, p, parse_value(v, cur))
-        extra = ask("другие ключи «путь=значение …» (пусто — нет)", "")
-        for p, v in parse_assignments(extra).items():
-            set_path(cfg, p, parse_value(v, get_path(cfg, p)))
-        try:
-            validate_candidate(cfg)
-        except ConfigError as exc:
-            print(f"конфиг песочницы невалиден: {exc}")
-            return
-        seed_txt = ask("засеять драйвы «SEEKING=0.9 PANIC=0.4» (пусто — начальное состояние)", "")
-        seed = {k: float(v) for k, v in parse_assignments(seed_txt).items()}
-        state = seed_state(validate_candidate(cfg), seed, time.time()) if seed else None
-
-        res = tgt.run(["mktemp", "-d", SANDBOX_PREFIX + "XXXXXX"], check=True)
-        root = res.stdout.strip()
-        if not root.startswith(SANDBOX_PREFIX):
-            print(f"странный каталог песочницы: {root!r}")
-            return
-        pid = None
-        try:
-            tgt.run(["mkdir", "-p", f"{root}/config", f"{root}/var"], check=True)
-            for name in ("default.json", "repertoire.json", *(f"lexicon.{l}.json" for l in config.LEXICONS)):
-                if name == "default.json":
-                    data = dump_json(cfg)
-                else:
-                    data = open(os.path.join(REPO_CONFIG, name), encoding="utf-8").read()
-                tgt.write_file(f"{root}/config/{name}", data)
-            if state is not None:
-                # Засев ДО старта: демон ещё не запущен, SIGTERM-сохранение затереть нечего.
-                tgt.write_file(f"{root}/var/state.json", json.dumps(state))
-            tgt.run(["chown", "-R", f"{s['motus_user']}:", root] if s["motus_via"] or os.geteuid() == 0
-                    else ["true"], check=True)
-            port = self._free_port(tgt)
-            sock = f"{root}/adm.sock"
-            code = s["motus_code_dir"] if s["motus_via"] else REPO
-            daemon = (f"cd {shlex.quote(code)} && nohup setsid python3 -m motus.daemon "
-                      f"--config {root}/config --var {root}/var --pub-port {port} "
-                      f"--pub-host 0.0.0.0 --admin-socket {sock} "
-                      f"> {root}/motusd.log 2>&1 < /dev/null & echo $!")
-            user = s["motus_user"] if (s["motus_via"] or os.geteuid() == 0) else None
-            out = tgt.run(["sh", "-c", daemon], user=user, check=True)
-            pid = int(out.stdout.strip().splitlines()[-1])
-            print(f"песочница: {tgt.label()}:{root}, pid {pid}, порт {port}")
-            if not self.wait_health(sock, 30.0, tgt):
-                print((tgt.read_file(f"{root}/motusd.log") or "")[-2000:])
-                return
-            host = self._target_ip(s["motus_via"]) if s["motus_via"] else "127.0.0.1"
-            t1 = (f"MOTUS_TIER1_STATE=/tmp/motus-t1-sandbox-{port} python3 {s['tier1_executor']} "
-                  f"--motusd http://{host}:{port}")
-            oc = s["openclaw_via"]
-            line = (f"incus exec {oc} -- sudo -u {s['openclaw_user']} {t1}" if oc
-                    else f"sudo -u {s['openclaw_user']} {t1}")
-            hr("Tier 1 против песочницы")
-            print(line)
-            print("(добавьте --dry-run, чтобы только посмотреть задачу)")
-            self._sandbox_loop(tgt, root, sock)
-        finally:
-            self._sandbox_cleanup(tgt, root, pid)
-
-    def _sandbox_loop(self, tgt: Target, root: str, sock: str) -> None:
-        while True:
-            i = choose("песочница", ["состояние (драйвы, режим)", "тик", "карточка",
-                                     "хвост журнала", "лог демона"], zero="остановить и убрать")
-            if i is None:
-                return
-            if i == 0:
-                raw = self.admin_get("/state/raw", sock, tgt) or {}
-                print(f"режим {raw.get('regime')}; " +
-                      " ".join(f"{k}={v:.3f}" for k, v in raw.get("drives", {}).items()))
-            elif i == 1:
-                d = self.admin_get("/tick", sock, tgt, method="POST") or {}
-                print(f"tier {d.get('tier')}, {d.get('reason')}, задача: {(d.get('task') or {}).get('template_id')}")
-            elif i == 2:
-                d = self.admin_get("/state/card", sock, tgt) or {}
-                print((d.get("card") or {}).get("text"))
-            elif i == 3:
-                d = self.admin_get("/journal/tail?n=15", sock, tgt) or {}
-                for r in d.get("records", []):
-                    print(f"  {r['seq']:>5} {r['kind']:<14} {json.dumps(r.get('payload'), ensure_ascii=False)[:100]}")
-            elif i == 4:
-                print((tgt.read_file(f"{root}/motusd.log") or "")[-2000:])
-
-    def _sandbox_cleanup(self, tgt: Target, root: str, pid: Optional[int]) -> None:
-        if pid:
-            tgt.run(["kill", "-TERM", str(pid)])
-            # Ждать фактического завершения процесса, а не только сигнала.
-            for _ in range(60):
-                if tgt.run(["kill", "-0", str(pid)]).returncode != 0:
-                    break
-                time.sleep(0.25)
-            else:
-                tgt.run(["kill", "-KILL", str(pid)])
-        if root.startswith(SANDBOX_PREFIX):
-            tgt.run(["rm", "-rf", "--", root])
-            print(f"песочница остановлена и удалена: {root}")
-
-    @staticmethod
-    def _free_port(tgt: Target) -> int:
-        # Свежий порт на каждый прогон: переиспользование сразу падает на TIME_WAIT.
-        probe = ("import socket;s=socket.socket();s.bind(('0.0.0.0',0));"
-                 "print(s.getsockname()[1]);s.close()")
-        for _ in range(5):
-            res = tgt.run(["python3", "-c", probe], check=True)
-            port = int(res.stdout.strip())
-            if port != 18790:
-                return port
-        return 20000 + random.randint(0, 9999)
-
-    @staticmethod
-    def _target_ip(via: str) -> str:
-        res = subprocess.run(["incus", "list", via, "-c4", "--format", "csv"],
-                             capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        for tok in res.stdout.replace(",", " ").split():
-            if tok.count(".") == 3:
-                return tok
-        return "<ip-контейнера>"
 
     # ---------------------------------------------------------------- openclaw (§5)
 
@@ -1353,7 +1240,7 @@ class App:
                 val = res.stdout.strip().splitlines()[0] if res.returncode == 0 and res.stdout.strip() else "?"
                 labels.append(f"{path.rsplit('.', 1)[-1]:<10} = {val:<7} — {h}")
             labels.append("перезапустить гейтвей openclaw")
-            i = choose("openclaw", labels)
+            i = choose("OpenClaw", labels)
             if i is None:
                 return
             if i == len(self.OC_KEYS):
@@ -1416,7 +1303,7 @@ class App:
         keys = list(DEFAULT_SETTINGS)
         while True:
             labels = [f"{k:<20} = {fmt_val(self.s[k]):<38} — {SETTINGS_HELP[k]}" for k in keys]
-            i = choose(f"Настройки меню ({self.settings_path})", labels)
+            i = choose(f"Запуск через ({self.settings_path})", labels)
             if i is None:
                 return
             k = keys[i]

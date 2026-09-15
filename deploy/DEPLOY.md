@@ -161,3 +161,25 @@ incus exec grach -- journalctl -u motus-tier2.service --since today
 GGUF на бинд-маунте, `appraisal.api: llamacpp`, `base_url: http://127.0.0.1:8080`.
 На замерах она хуже (Qwen3-1.7B на CPU Pi проигрывает и словарю, и gemma4 на ПК),
 держим как запасной вариант на случай, если ПК окажется недоступен слишком часто.
+
+## Claude для L-1 и самокурирования (2026-09-15)
+
+`appraisal.api` и `curation.api` = `claude_cli`: модель `claude-sonnet-5` через
+`claude -p` на подписке Claude Code, без инструментов и со своим коротким системным
+промптом (~1 тыс. токенов на сообщение — расход общего 5-часового лимита).
+
+```bash
+# бинарь (нативный, зависит только от libc) — из того же npm-пакета, что в grach
+incus exec grach -- cat /home/openclaw/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe \
+  | incus exec motus -- sh -c 'mkdir -p /opt/claude && cat > /opt/claude/claude && chmod 755 /opt/claude/claude'
+
+# долгоживущий токен подписки: `claude setup-token` в любом терминале с браузером,
+# затем вставить токен (ввод не отображается в истории команд):
+incus exec motus -- sh -c 'umask 077; mkdir -p /etc/motus; printf "токен: "; read -r t; \
+  printf "CLAUDE_CODE_OAUTH_TOKEN=%s\n" "$t" > /etc/motus/claude.env'
+incus exec motus -- systemctl restart motusd
+```
+
+Отдельный токен, а не копия `~/.claude/.credentials.json` из grach: два экземпляра
+одного OAuth-входа сбивают друг другу обновление токена.
+

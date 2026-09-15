@@ -1114,9 +1114,11 @@ class TestConfig(unittest.TestCase):
         c = cfg_full()
         self.assertEqual(c["appraisal"]["model_fallback"], "lexical")
 
-    def test_curation_disabled_by_default_in_shipped_config(self):
+    def test_curation_enabled_by_operator_in_shipped_config(self):
+        # 2026-09-15: включено осознанно оператором (claude-sonnet-5 через claude -p).
+        # Отказ модели при этом не ломает ночь — цикл просто пропускается.
         c = cfg_full()
-        self.assertFalse(c["curation"]["enabled"])
+        self.assertTrue(c["curation"]["enabled"])
 
     def test_curation_enabled_must_be_bool(self):
         c = cfg_full()
@@ -1348,6 +1350,117 @@ class TestReplay(unittest.TestCase):
             self.assertGreater(res.ticks, 100)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestReplayAcrossRestart(unittest.TestCase):
+    """Реплей воспроизводит живой демон целиком, включая рестарт со state.json и
+    всё, что раньше меняло состояние мимо журнала: сон, refund, протухание задач
+    при опросе очереди, outcome консумации, подмену репертуара снапшотом."""
+
+    def _drive(self, svc, t, rnd, steps, kinds):
+        eng = svc.engine
+        for i in range(steps):
+            t += rnd.uniform(60, 900)
+            if i % 60 == 0:
+                eng.submit_event(Event("user_message", t,
+                                       {"appraisal": {"novelty": 2, "social_warmth": 1}}))
+            if i % 31 == 0:
+                eng.submit_event(Event("tool_error", t, {"tool": "net", "blocking": True}))
+            d = eng.tick(t)
+            if d.tier == 2:
+                kinds.add(len(kinds))
+                if len(kinds) % 2:
+                    eng.refund_initiation()
+            if d.task and i % 3:
+                eng.consummate(d.task.template_id, i % 5 != 0, 50.0,
+                               outcome="confirmed" if i % 7 == 0 else None)
+            if d.task and i % 3 == 0:
+                # задача осталась в очереди — дать ей протухнуть и опросить очередь
+                t += eng.rep.TASK_TTL_S + 1
+                eng.submit_event(Event("net_up", t, {}))
+                eng.peek_task()
+            if i % 97 == 0:
+                eng.maybe_sleep(force=True)
+            svc.save_state()
+        return t
+
+    def test_replay_is_exact_across_restart(self):
+        from motus.daemon import Service
+        cfg = cfg_full()
+        cfg["appraisal"] = {"mode": "lexical"}
+        # Низкие пороги — чтобы за 800 тиков реально были и задачи, и инициации.
+        cfg["heartbeat"].update(theta_task=0.5, theta_act=0.55, task_min_interval_s=120)
+        cfg["budget"].update(refractory_s=300)
+        cfg["budget"]["quiet_hours"]["enabled"] = False
+        config.validate(cfg)
+        tmp = tempfile.mkdtemp(prefix="motus-restart-")
+        try:
+            rnd = random.Random(7)
+            kinds = set()
+            svc1 = Service(cfg, tmp)
+            t = self._drive(svc1, svc1.engine.state.t, rnd, 400, kinds)
+
+            # «Прошлая ночь» оставила эволюционировавший репертуар на диске.
+            data = copy.deepcopy(svc1.engine.rep.data)
+            for tpl in data["templates"]:
+                tpl["efficacy"] = {"n": 9, "mean_delta": rnd.uniform(0, 0.5),
+                                   "success_rate": 0.5, "mean_cost": 10.0}
+            with open(os.path.join(tmp, "repertoire.json"), "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+
+            svc2 = Service(cfg, tmp)  # рестарт: state.json + repertoire.json
+            self.assertNotEqual(svc2.engine.state.drives,
+                                State.initial(cfg, svc2.engine.state.t).drives)
+            self._drive(svc2, t, rnd, 400, kinds)
+
+            recs = list(svc2.journal.read_all())
+            got = {r["kind"] for r in recs}
+            for k in ("boot", "sleep", "refund", "task_expired", "repertoire", "consummation"):
+                self.assertIn(k, got)
+            self.assertEqual(sum(r["kind"] == "boot" for r in recs), 2)
+
+            res = replay.replay(cfg, recs)
+            self.assertEqual(res.legacy_boots, [])
+            self.assertTrue(
+                res.deterministic,
+                "реплей разошёлся: " + "; ".join(
+                    f"{d.field}@{d.seq}: {d.expected}!={d.got}" for d in res.divergences[:5]))
+            self.assertGreater(res.ticks, 700)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_replay_carries_validation_outcome(self):
+        cfg = cfg_full()
+        tmp = tempfile.mkdtemp(prefix="motus-outcome-")
+        try:
+            st = State.initial(cfg, T0)
+            st.drives["FEAR"] = 0.9
+            vid = "verify_state:1.0"
+            st.pending_validations[vid] = {
+                "template_id": "verify_state", "drive": "FEAR", "rule": "x",
+                "due_at": T0 - 1.0, "created_at": T0 - 2000.0,
+            }
+            ck = VirtualClock(T0)
+            eng = Engine(cfg, ck, Journal(os.path.join(tmp, "journal")), st)
+            ck.advance(60)
+            d = eng.tick(ck.now())
+            self.assertIsNotNone(d.task)
+            self.assertEqual(d.task.validation_id, vid)
+            eng.consummate(d.task.template_id, True, 5.0, outcome="invalidated")
+            for _ in range(5):
+                ck.advance(120)
+                eng.tick(ck.now())
+            res = replay.replay_journal(cfg, Journal(os.path.join(tmp, "journal")))
+            self.assertTrue(res.deterministic, [
+                f"{d.field}@{d.seq}: {d.expected}!={d.got}" for d in res.divergences[:5]])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_legacy_boot_is_reported(self):
+        cfg = cfg_full()
+        recs = [{"seq": 1, "t": T0, "kind": "boot", "payload": {"tz_offset_s": 0.0}},
+                {"seq": 2, "t": T0 + 60, "kind": "tick", "payload": {}}]
+        self.assertEqual(replay.replay(cfg, recs).legacy_boots, [1])
 
 
 class TestListenerSplit(unittest.TestCase):

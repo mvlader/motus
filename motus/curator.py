@@ -100,6 +100,22 @@ def make_sensor(cfg: Dict[str, Any]) -> Callable[[str], Any]:
     рассуждение сложнее классификации одного сообщения — здесь уместна модель
     посильнее, чем для L-1 (см. docs/04-model-l1.md, «curation»)."""
     api = cfg.get("api", "ollama")
+    if api == "claude_cli":
+        claude_bin = cfg.get("claude_bin", "/opt/claude/claude")
+        model = cfg["model"]
+        timeout_s = float(cfg.get("timeout_s", 180.0))
+        effort = cfg.get("effort", "medium")
+        # Корень структурированного вывода CLI — объект; массив правок заворачивается
+        # и тут же разворачивается, propose_edits видит тот же список, что и раньше.
+        wrapped = {"type": "object", "properties": {"edits": edits_schema()},
+                   "required": ["edits"]}
+
+        def cli_sensor(prompt: str) -> Any:
+            out = modelcall.claude_cli_complete(
+                claude_bin, model, prompt, wrapped, timeout_s=timeout_s, effort=effort,
+            )
+            return out.get("edits") if isinstance(out, dict) else out
+        return cli_sensor
     base_url = cfg["base_url"]
     timeout_s = float(cfg.get("timeout_s", 60.0))
     num_predict = int(cfg.get("num_predict", 800))
@@ -121,7 +137,7 @@ def make_sensor(cfg: Dict[str, Any]) -> Callable[[str], Any]:
                 timeout_s=timeout_s, num_predict=num_predict, temperature=temperature,
             )
         return sensor
-    raise ValueError(f"curation.api: неизвестное значение {api!r} (llamacpp|ollama)")
+    raise ValueError(f"curation.api: неизвестное значение {api!r} (llamacpp|ollama|claude_cli)")
 
 
 def propose_edits(sensor: Callable[[str], Any], efficacy_report: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

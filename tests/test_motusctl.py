@@ -24,7 +24,6 @@ from motus import config  # noqa: E402
 from motus.clock import VirtualClock  # noqa: E402
 from motus.config import ConfigError  # noqa: E402
 from motus.engine import Engine  # noqa: E402
-from motus.state import State  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("motusctl", os.path.join(ROOT, "tools", "motusctl.py"))
 motusctl = importlib.util.module_from_spec(_spec)
@@ -217,13 +216,6 @@ class SaveConfigTests(TempConfigDir):
             t.write_file("/var/lib/motus/state.json", "{}")
         t._runner.assert_not_called()
 
-    def test_no_code_path_writes_state_json(self):
-        src = open(os.path.join(ROOT, "tools", "motusctl.py"), encoding="utf-8").read()
-        # Единственное упоминание записи state.json — засев песочницы под SANDBOX_PREFIX.
-        hits = [ln for ln in src.splitlines() if "state.json" in ln and "write_file" in ln]
-        self.assertEqual(len(hits), 1)
-        self.assertIn("{root}/var/state.json", hits[0])
-
 
 class TargetTests(unittest.TestCase):
     def test_local_and_incus_argv(self):
@@ -369,30 +361,128 @@ class ReplayBenchTests(unittest.TestCase):
         self.assertEqual([r["seq"] for r in motusctl.records_from_boot(files, "2026-09-13")], [4, 5])
 
 
-# ------------------------------------------------------------------ песочница
+# ------------------------------------------------------------------ меню
 
 
-class SandboxSeedTests(unittest.TestCase):
+class MenuSchemaTests(unittest.TestCase):
+    def test_status_keys_exist_in_config(self):
+        cfg = raw_cfg()
+        for path, why in motusctl.STATUS_KEYS:
+            self.assertTrue(motusctl.has_path(cfg, path), path)
+            self.assertTrue(why)
+
+    def test_l1_moved_out_of_agent_sections(self):
+        self.assertNotIn("appraisal", [p for _, p, _ in motusctl.AGENT_SECTIONS])
+        self.assertIn("curation", [p for _, p, _ in motusctl.AGENT_SECTIONS])
+
+    def test_sandbox_is_gone(self):
+        self.assertFalse(hasattr(motusctl.App, "menu_sandbox"))
+        self.assertFalse(hasattr(motusctl, "seed_state"))
+
+
+# ------------------------------------------------------------------ claude_cli
+
+
+FAKE_CLAUDE = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+prompt = sys.stdin.read()
+with open(os.environ["FAKE_LOG"], "w") as fh:
+    json.dump({"args": args, "prompt": prompt}, fh)
+mode = os.environ.get("FAKE_MODE", "ok")
+if mode == "error":
+    print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                      "result": "Invalid API key"}))
+    sys.exit(1)
+if mode == "garbage":
+    print("not json"); sys.exit(0)
+schema = json.loads(args[args.index("--json-schema") + 1])
+if "edits" in schema.get("properties", {}):
+    out = {"edits": [{"op": "archive", "id": "wander"}]}
+else:
+    out = {"valence": 2, "threat": 0, "novelty": 0, "social_warmth": 1, "loss": 0,
+           "agency_blocked": False}
+print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                  "result": json.dumps(out), "structured_output": out}))
+"""
+
+
+class ClaudeCliTests(unittest.TestCase):
     def setUp(self):
-        self.cfg = motusctl.validate_candidate(raw_cfg())
+        self.tmp = tempfile.mkdtemp(prefix="motus-cli-")
+        self.bin = os.path.join(self.tmp, "claude")
+        with open(self.bin, "w") as fh:
+            fh.write(FAKE_CLAUDE)
+        os.chmod(self.bin, 0o755)
+        self.log = os.path.join(self.tmp, "log.json")
+        self.env = unittest.mock.patch.dict(os.environ, {"FAKE_LOG": self.log, "FAKE_MODE": "ok"})
+        self.env.start()
 
-    def test_seed_clips_and_loads_back(self):
-        d = motusctl.seed_state(self.cfg, {"SEEKING": 1.7, "PANIC": -0.2}, T0)
-        st = State.from_dict(json.loads(json.dumps(d)))
-        self.assertEqual(st.drives["SEEKING"], 1.0)
-        self.assertEqual(st.drives["PANIC"], 0.0)
+    def tearDown(self):
+        self.env.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_seed_rejects_nan_and_unknown(self):
-        with self.assertRaises(ValueError):
-            motusctl.seed_state(self.cfg, {"SEEKING": math.nan}, T0)
-        with self.assertRaises(ValueError):
-            motusctl.seed_state(self.cfg, {"JOY": 0.5}, T0)
+    def _ap_cfg(self):
+        return {"mode": "model", "api": "claude_cli", "model": "claude-sonnet-5",
+                "claude_bin": self.bin, "timeout_s": 20}
 
-    def test_parse_assignments(self):
-        self.assertEqual(motusctl.parse_assignments("SEEKING=0.9, PANIC=0.4"),
-                         {"SEEKING": "0.9", "PANIC": "0.4"})
-        with self.assertRaises(ValueError):
-            motusctl.parse_assignments("SEEKING")
+    def test_appraisal_sensor_parses_structured_output(self):
+        from motus import appraisal
+        sensor = appraisal.make_sensor(self._ap_cfg())
+        out = sensor("ура, всё заработало")
+        self.assertEqual(out["valence"], 2)
+        log = json.load(open(self.log))
+        # текст пользователя — через stdin, не в argv
+        self.assertIn("ура, всё заработало", log["prompt"])
+        self.assertNotIn("ура, всё заработало", " ".join(log["args"]))
+        # никаких инструментов, свой системный промпт вместо штатного, модель из конфига
+        self.assertEqual(log["args"][log["args"].index("--tools") + 1], "")
+        self.assertIn("--system-prompt", log["args"])
+        self.assertIn("--no-session-persistence", log["args"])
+        self.assertEqual(log["args"][log["args"].index("--model") + 1], "claude-sonnet-5")
+
+    def test_cli_failure_raises_so_fallback_applies(self):
+        from motus import appraisal
+        from motus.appraisal import Appraiser
+        for mode in ("error", "garbage"):
+            os.environ["FAKE_MODE"] = mode
+            sensor = appraisal.make_sensor(self._ap_cfg())
+            with self.assertRaises(Exception):
+                sensor("текст")
+            ap = Appraiser(sensor, mode="model", model_fallback="lexical")
+            ap.appraise_text("спасибо, ты молодец")
+            self.assertTrue(ap.last_failed)
+
+    def test_curator_unwraps_edits(self):
+        from motus import curator
+        sensor = curator.make_sensor({"enabled": True, "api": "claude_cli",
+                                      "model": "claude-sonnet-5", "claude_bin": self.bin})
+        self.assertEqual(sensor("prompt"), [{"op": "archive", "id": "wander"}])
+
+    def test_config_accepts_claude_cli_without_base_url(self):
+        cfg = raw_cfg()
+        cfg["appraisal"] = self._ap_cfg()
+        cfg["curation"] = {"enabled": True, "api": "claude_cli", "model": "claude-sonnet-5"}
+        config.assemble(cfg)
+        del cfg["curation"]["model"]
+        with self.assertRaises(ConfigError):
+            config.assemble(cfg)
+
+    def test_operator_config_uses_sonnet_5_and_curation_on(self):
+        cfg = config.load()
+        self.assertEqual((cfg["appraisal"]["api"], cfg["appraisal"]["model"]),
+                         ("claude_cli", "claude-sonnet-5"))
+        self.assertTrue(cfg["curation"]["enabled"])
+        self.assertEqual(cfg["curation"]["model"], "claude-sonnet-5")
+
+    def test_daemon_does_not_warm_up_claude(self):
+        from motus.daemon import Service
+        cfg = cfg = config.load()
+        cfg["appraisal"] = self._ap_cfg()
+        cfg["curation"]["enabled"] = False
+        with unittest.mock.patch.object(Service, "_warm_up_sensor") as warm:
+            Service(cfg, os.path.join(self.tmp, "var"))
+        warm.assert_not_called()
 
 
 if __name__ == "__main__":

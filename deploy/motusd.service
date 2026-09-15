@@ -22,6 +22,14 @@ ExecStart=/usr/bin/python3 -m motus.daemon \
   --admin-socket /run/motusd/adm.sock
 Restart=on-failure
 RestartSec=5
+# L-1 и самокурирование — claude-sonnet-5 через `claude -p` (подписка Claude Code,
+# бинарь /opt/claude/claude). Токен — `claude setup-token`, файл 600 root:
+#   CLAUDE_CODE_OAUTH_TOKEN=...
+# Нет файла — L-1 откатывается на словарь, курирование пропускает ночь.
+EnvironmentFile=-/etc/motus/claude.env
+Environment=HOME=/var/lib/motus
+Environment=DISABLE_AUTOUPDATER=1
+Environment=CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
 NoNewPrivileges=yes
 PrivateTmp=yes
@@ -30,7 +38,8 @@ ProtectHome=yes
 ReadWritePaths=/var/lib/motus
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_UNIX
+# AF_INET6: api.anthropic.com отдаёт и IPv6-адреса.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=multi-user.target

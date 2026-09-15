@@ -17,6 +17,14 @@ SOMATIC = ("energy", "integrity", "thermal", "limit")
 #: Языки лексикона карточки: config/lexicon.<код>.json. Это язык, на котором
 #: карточка говорит с моделью (внутренняя речь бота), а не язык меню motusctl.
 LEXICONS = ("ru", "en")
+
+#: Рантаймы модели для L-1 и курирования и обязательные для них ключи.
+MODEL_APIS = ("llamacpp", "ollama", "claude_cli")
+_API_REQUIRED = {
+    "llamacpp": ("base_url",),
+    "ollama": ("base_url", "model"),
+    "claude_cli": ("model",),
+}
 DEFAULT_LEXICON = "en"
 
 
@@ -181,9 +189,9 @@ def validate(cfg: Dict[str, Any]) -> None:
         raise ConfigError(f"appraisal.model_fallback: ожидается null|lexical, получено {fallback!r}")
     if mode == "model":
         api = ap.get("api", "llamacpp")
-        if api not in ("llamacpp", "ollama"):
-            raise ConfigError(f"appraisal.api: ожидается llamacpp|ollama, получено {api!r}")
-        required = ("base_url",) if api == "llamacpp" else ("base_url", "model")
+        if api not in MODEL_APIS:
+            raise ConfigError(f"appraisal.api: ожидается {'|'.join(MODEL_APIS)}, получено {api!r}")
+        required = _API_REQUIRED[api]
         for key in required:
             if not ap.get(key):
                 raise ConfigError(f"appraisal.mode=model, но не задано appraisal.{key}")
@@ -193,9 +201,9 @@ def validate(cfg: Dict[str, Any]) -> None:
         raise ConfigError("curation.enabled: ожидается true|false")
     if cu.get("enabled"):
         api = cu.get("api", "ollama")
-        if api not in ("llamacpp", "ollama"):
-            raise ConfigError(f"curation.api: ожидается llamacpp|ollama, получено {api!r}")
-        required = ("base_url",) if api == "llamacpp" else ("base_url", "model")
+        if api not in MODEL_APIS:
+            raise ConfigError(f"curation.api: ожидается {'|'.join(MODEL_APIS)}, получено {api!r}")
+        required = _API_REQUIRED[api]
         for key in required:
             if not cu.get(key):
                 raise ConfigError(f"curation.enabled=true, но не задано curation.{key}")
