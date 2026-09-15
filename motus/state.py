@@ -56,6 +56,18 @@ class State:
     #: публичном API — само число наружу не идёт, идёт готовый текст.
     claude_limit_reset_at: float = 0.0
 
+    #: Отложенная валидация (2026-09-14, докритиковано Perplexity): FEAR
+    #: check_passed/artifact_created может сейчас казаться в порядке, но
+    #: перестать быть в порядке позже — proверка "здесь и сейчас" не ловит
+    #: это. Ключ — validation_id (template_id+issued_t), значение — что и
+    #: когда перепроверить. Живёт только для шаблонов с consummation.validation
+    #: в репертуаре; для остальных пусто всегда. Не про доверие к модели —
+    #: recheck_prior_finding верифицируется тем же кодовым способом
+    #: (файл-факт), что и любой check_passed; про модель — только оценка
+    #: "актуально/протухло", которую код читает по фиксированному маркеру, не
+    #: как вольный текст.
+    pending_validations: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
     @classmethod
     def initial(cls, cfg: Dict[str, Any], t: float) -> "State":
         return cls(

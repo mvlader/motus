@@ -36,6 +36,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -198,6 +199,34 @@ def verify(consummation: Dict[str, Any], drop: Optional[Path], started: float,
     return True, ctype
 
 
+#: Маркер, которым recheck-ход обязан закончить памятку, если он разрешает
+#: отложенную FEAR-валидацию (task["resolves_validation"]). Не "слова модели
+#: решают" — это фиксированный, единственно допустимый формат строки, который
+#: код ищет regex'ом в уже провернутом через verify() файле-факте. Свободный
+#: текст вокруг не читается; отсутствие строки = валидация НЕ разрешается
+#: (остаётся pending, попробуем ещё раз на следующем due-цикле).
+_VALIDATION_OUTCOME_RE = re.compile(
+    r"^\s*ИТОГ_ПРОВЕРКИ:\s*(подтверждено|устарело)\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def read_validation_outcome(drop: Optional[Path]) -> Optional[str]:
+    """None — маркер не найден (валидация не разрешается сейчас).
+    "confirmed" / "invalidated" — найден, однозначен."""
+    if drop is None or not drop.exists():
+        return None
+    try:
+        text = drop.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = _VALIDATION_OUTCOME_RE.search(text)
+    if not m:
+        return None
+    word = m.group(1).lower()
+    return "confirmed" if word == "подтверждено" else "invalidated"
+
+
 # --------------------------------------------------------------- основной цикл
 
 
@@ -263,7 +292,11 @@ def _run(args) -> int:
             prompt=task["prompt"],
         )
     else:
-        drop = args.state_dir / "drops" / f"{tid}-{int(task.get('issued_t', time.time()))}"
+        # Живёт ВНУТРИ --workspace (не --state-dir!): write-инструмент openclaw
+        # сэндбоксит запись только в пределах --cwd/--workspace. Найдено
+        # 2026-09-14 живым прогоном — модель честно писала "путь вне
+        # разрешённой песочницы", state-dir лежал снаружи неё.
+        drop = args.workspace / ".motus" / "drops" / f"{tid}-{int(task.get('issued_t', time.time()))}"
         drop.parent.mkdir(parents=True, exist_ok=True)
         if drop.exists():
             drop.unlink()
@@ -297,6 +330,17 @@ def _run(args) -> int:
         file=sys.stderr,
     )
 
+    # Отложенная FEAR-валидация: этот ход мог быть выдан именно чтобы
+    # разрешить раньше запланированную проверку (task["resolves_validation"]).
+    # outcome читается ТОЛЬКО из фиксированного маркера в уже верифицированном
+    # (verify()) файле — не из свободного текста ответа модели.
+    consum_body = {"template_id": tid, "verified": verified, "cost": float(tin + tout)}
+    if task.get("resolves_validation") and verified:
+        outcome = read_validation_outcome(drop)
+        if outcome is not None:
+            consum_body["outcome"] = outcome
+        print(f"tier1: {tid} resolves_validation outcome={outcome}", file=sys.stderr)
+
     # Стоимость — токены хода (репертуар считает эффективность по ним).
     cost = float(tin + tout)
     try:
@@ -305,8 +349,7 @@ def _run(args) -> int:
                 "model": args.model or "openclaw/agent-exec", "purpose": "task",
                 "tokens_in": tin, "tokens_out": tout, "template_id": tid,
             })
-        _post(f"{base}/consummation",
-              {"template_id": tid, "verified": verified, "cost": cost})
+        _post(f"{base}/consummation", consum_body)
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         print(f"tier1: не удалось отчитаться в MOTUS ({exc})", file=sys.stderr)
         return 1

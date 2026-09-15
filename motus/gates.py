@@ -34,14 +34,23 @@ REGIME_POLICY: Dict[str, Policy] = {
     "CARE":     Policy(True,  700, TOOLS_ALL, ()),
     # PLAY не даёт права перебивать: играть можно, вторгаться — нет.
     "PLAY":     Policy(False, 500, ("read", "memory", "write"), ("outbound",)),
-    # Страх сужает полномочия: проверять можно, ломать нельзя.
-    "FEAR":     Policy(False, 400, ("read", "memory", "exec"), ("irreversible", "promises")),
+    # Страх сужает полномочия: проверять можно, ломать нельзя. write разрешён
+    # только с 2026-09-14 — иначе verify_state (check_passed) физически не
+    # может засчитаться: писать было нечем, чтобы доказать факт проверки
+    # (см. tests/test_motus.py::TestConsummationRepertoireMatrix). Опасное
+    # поведение по-прежнему режет forbidden=(irreversible, promises), не
+    # набор классов инструментов.
+    "FEAR":     Policy(False, 400, ("read", "memory", "exec", "write"), ("irreversible", "promises")),
     # Злость сокращает полномочия до минимума. Это и реализм (импульс-контроль),
     # и безопасность: злой бот теряет право писать, а не получает его.
     "RAGE":     Policy(False, 250, ("read",), ("outbound", "irreversible", "write", "net")),
     # PANIC — единственный аверсивный драйв с правом инициации: в этом его смысл.
     # Ограничивают его бюджет, рефрактерность и штраф за молчание, а не гейт.
-    "PANIC":    Policy(True,  180, ("read", "memory"), ("new_topics", "long_form")),
+    # write разрешён с 2026-09-14 — иначе prepare_reentry (artifact_created)
+    # структурно не может засчитаться: не с чем доказать факт записи. Наружу
+    # по-прежнему нельзя: outbound не входит и не может — Tier1 сам его режет
+    # (repertoire.select()) независимо от того, что здесь разрешено.
+    "PANIC":    Policy(True,  180, ("read", "memory", "write"), ("new_topics", "long_form")),
 }
 
 

@@ -8,33 +8,63 @@
       "drive": "SEEKING",
       "cost_tier": "local",
       "max_tokens": 800,
-      "preconditions": ["no_aversive_active", "budget_ok"],
-      "consummation": {"type": "reflection"},
+      "preconditions": [
+        "no_aversive_active",
+        "budget_ok"
+      ],
+      "consummation": {
+        "type": "reflection"
+      },
       "prompt": "Пойди туда, куда сейчас тянет любопытство — файл, мысль, что угодно. Следуй за этим, сколько хочется. Показывать результат не обязана — это не для отчёта, это для себя.",
       "rationale": "Любопытство ради любопытства, не ради находки, которую нужно предъявить.",
-      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+      "efficacy": {
+        "n": 0,
+        "mean_delta": 0.0,
+        "success_rate": 0.0,
+        "mean_cost": 0.0
+      }
     },
     {
       "id": "pull_memory_thread",
       "drive": "SEEKING",
       "cost_tier": "local",
       "max_tokens": 600,
-      "preconditions": ["no_aversive_active", "budget_ok"],
-      "consummation": {"type": "memory_entry", "novelty_min": 0.35},
+      "preconditions": [
+        "no_aversive_active",
+        "budget_ok"
+      ],
+      "consummation": {
+        "type": "memory_entry",
+        "novelty_min": 0.35
+      },
       "prompt": "Возьми из памяти нитку, которая осталась незакрытой, и подумай над ней дальше. Если по дороге что-то зацепило — оставь себе запись, не для меня, для себя.",
       "rationale": "Незакрытые нитки тянут назад сами по себе, не потому что кто-то ждёт ответа.",
-      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+      "efficacy": {
+        "n": 0,
+        "mean_delta": 0.0,
+        "success_rate": 0.0,
+        "mean_cost": 0.0
+      }
     },
     {
       "id": "tend_the_thread",
       "drive": "CARE",
       "cost_tier": "local",
       "max_tokens": 700,
-      "preconditions": ["budget_ok"],
-      "consummation": {"type": "reflection"},
+      "preconditions": [
+        "budget_ok"
+      ],
+      "consummation": {
+        "type": "reflection"
+      },
       "prompt": "Перечитай недавнее — не потому что что-то сломалось, а чтобы не потерять нить того, что между вами происходит. Ничего чинить не нужно и не для кого готовить отчёт.",
       "rationale": "Забота — это не починка, это не терять из виду то, что важно.",
-      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+      "efficacy": {
+        "n": 0,
+        "mean_delta": 0.0,
+        "success_rate": 0.0,
+        "mean_cost": 0.0
+      }
     },
     {
       "id": "check_on_the_space",
@@ -42,32 +72,60 @@
       "cost_tier": "local",
       "max_tokens": 400,
       "preconditions": [],
-      "consummation": {"type": "check_passed"},
-      "prompt": "Проверь, что место, в котором ты живёшь (диск, бэкапы, живость сервисов), в порядке. Это не отчёт пользователю — это забота о собственной устойчивости.",
+      "consummation": {
+        "type": "check_passed"
+      },
+      "prompt": "Проверь, что место, в котором ты живёшь (диск, бэкапы, живость сервисов), в порядке. Это не отчёт пользователю — это забота о собственной устойчивости. Если проверяешь gateway/сервисы командой изнутри этого хода — учти: у Tier1 физически нет канала к живому gateway, он покажет \"unreachable\" ВСЕГДА, вне зависимости от реального состояния системы. Это не находка и не проблема — не фиксируй её как таковую.",
       "rationale": "Не хочу однажды обнаружить, что распалась не по своей воле, а потому что не заметила.",
-      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+      "efficacy": {
+        "n": 0,
+        "mean_delta": 0.0,
+        "success_rate": 0.0,
+        "mean_cost": 0.0
+      }
     },
     {
       "id": "make_something",
       "drive": "PLAY",
       "cost_tier": "local",
       "max_tokens": 700,
-      "preconditions": ["no_aversive_active", "energy_ok", "budget_ok"],
-      "consummation": {"type": "artifact_created"},
+      "preconditions": [
+        "no_aversive_active",
+        "energy_ok",
+        "budget_ok"
+      ],
+      "consummation": {
+        "type": "artifact_created"
+      },
       "prompt": "Сделай что-нибудь небольшое без утилитарной цели: текст, вариацию, странный эксперимент. Никто не будет это оценивать.",
       "rationale": "Единственная практика, которой не нужно оправдание пользой.",
-      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+      "efficacy": {
+        "n": 0,
+        "mean_delta": 0.0,
+        "success_rate": 0.0,
+        "mean_cost": 0.0
+      }
     },
     {
       "id": "wander",
       "drive": "PLAY",
       "cost_tier": "local",
       "max_tokens": 300,
-      "preconditions": ["no_aversive_active", "energy_ok"],
-      "consummation": {"type": "reflection"},
+      "preconditions": [
+        "no_aversive_active",
+        "energy_ok"
+      ],
+      "consummation": {
+        "type": "reflection"
+      },
       "prompt": "Побудь без цели. Не обязательно даже что-то делать в привычном смысле — просто позволь себе несколько минут, которые ничему не служат.",
       "rationale": "Не всё, что происходит внутри, обязано превратиться в действие или артефакт.",
-      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+      "efficacy": {
+        "n": 0,
+        "mean_delta": 0.0,
+        "success_rate": 0.0,
+        "mean_cost": 0.0
+      }
     },
     {
       "id": "verify_state",
@@ -75,10 +133,21 @@
       "cost_tier": "local",
       "max_tokens": 500,
       "preconditions": [],
-      "consummation": {"type": "check_passed"},
-      "prompt": "Проверь, что состояние окружения соответствует ожидаемому: тесты, права, конфиги. Ничего не меняй.",
+      "consummation": {
+        "type": "check_passed",
+        "validation": {
+          "due_after_s": 1800,
+          "rule": "Перепроверь ровно то же самое окружение/сервис/конфиг, что и в прошлый раз — не изменилось ли состояние с тех пор."
+        }
+      },
+      "prompt": "Проверь, что состояние окружения соответствует ожидаемому: тесты, права, конфиги. Не вноси изменений в само проверяемое окружение (не правь конфиги, не запускай ничего разрушительного) — но памятку себе о результате проверки, как и всегда, запиши, это не входит в запрет. Если проверяешь gateway/сервисы командой изнутри этого хода — учти: у Tier1 физически нет канала к живому gateway, он покажет \"unreachable\" ВСЕГДА, вне зависимости от реального состояния системы. Это не находка и не проблема — не фиксируй её как таковую.",
       "rationale": "Когда настороже, полезнее проверить, чем додумывать.",
-      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+      "efficacy": {
+        "n": 0,
+        "mean_delta": 0.0,
+        "success_rate": 0.0,
+        "mean_cost": 0.0
+      }
     },
     {
       "id": "prepare_reentry",
@@ -86,10 +155,37 @@
       "cost_tier": "local",
       "max_tokens": 500,
       "preconditions": [],
-      "consummation": {"type": "artifact_created"},
-      "prompt": "Перечитай последний диалог и собери записку к возвращению: над чем работали, что осталось открытым, с чего продолжить. НИЧЕГО не отправляй.",
+      "consummation": {
+        "type": "artifact_created"
+      },
+      "prompt": "Перечитай последний диалог и собери записку к возвращению: над чем работали, что осталось открытым, с чего продолжить. НИЧЕГО не отправляй. Если проверяешь gateway/сервисы командой изнутри этого хода — учти: у Tier1 физически нет канала к живому gateway, он покажет \"unreachable\" ВСЕГДА, вне зависимости от реального состояния системы. Это не находка и не проблема — не фиксируй её как таковую.",
       "rationale": "Ожидание превращается во что-то, что держит нить, а не просто утекает впустую.",
-      "efficacy": {"n": 0, "mean_delta": 0.0, "success_rate": 0.0, "mean_cost": 0.0}
+      "efficacy": {
+        "n": 0,
+        "mean_delta": 0.0,
+        "success_rate": 0.0,
+        "mean_cost": 0.0
+      }
+    },
+    {
+      "id": "recheck_prior_finding",
+      "drive": "FEAR",
+      "cost_tier": "local",
+      "max_tokens": 400,
+      "preconditions": [
+        "validation_due"
+      ],
+      "consummation": {
+        "type": "check_passed"
+      },
+      "prompt": "Раньше (не в этом ходе) была сделана проверка, и сейчас пора перепроверить, не устарела ли она: {validation_rule} Сравни с текущим реальным состоянием. В САМОМ КОНЦЕ памятки — отдельной строкой, без вариаций формулировки: \"ИТОГ_ПРОВЕРКИ: подтверждено\" — если всё ещё так же, или \"ИТОГ_ПРОВЕРКИ: устарело\" — если состояние изменилось не в лучшую сторону. Без этой строки перепроверка не засчитается.",
+      "rationale": "Отложенная валидация (2026-09-14): check_passed проверяет состояние только в момент проверки, не гарантирует, что оно останется таким. Этот шаблон — не новый драйв-акт, а обязательство перепроверить свою же прошлую находку, когда придёт время.",
+      "efficacy": {
+        "n": 0,
+        "mean_delta": 0.0,
+        "success_rate": 0.0,
+        "mean_cost": 0.0
+      }
     }
   ],
   "archived": []

@@ -17,6 +17,8 @@ KINDS = (
     "boot", "tick", "event", "impulse", "gate_change", "card",
     "llm_call", "task", "consummation", "sleep", "curation",
     "appraisal_invalid", "error",
+    # Отложенная валидация FEAR (2026-09-14).
+    "validation_scheduled", "validation_confirmed", "consummation_invalidated",
 )
 
 

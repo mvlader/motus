@@ -25,7 +25,12 @@ from .state import State
 
 #: Ключи предусловий, известные системе. Неизвестное предусловие = запрет
 #: (fail-closed): опечатка в конфиге не должна открывать ветку.
-PRECONDITIONS = ("no_aversive_active", "budget_ok", "energy_ok", "context_fresh")
+#: "validation_due" (2026-09-14) — особое: true, только если в
+#: st.pending_validations есть хоть одна запись с due_at <= now. Единственное
+#: предусловие, которое select() дополнительно использует ПОСЛЕ выбора
+#: шаблона — чтобы подставить в промпт, что именно перепроверять.
+PRECONDITIONS = ("no_aversive_active", "budget_ok", "energy_ok", "context_fresh",
+                 "validation_due")
 
 QUOTA_PER_NIGHT = 3  # сколько правок репертуара разрешено модели за один ночной цикл
 
@@ -65,6 +70,10 @@ class Task:
     issued_t: float
     expires_t: float
     drive_at_issue: float
+    #: Непусто, только если этот ход должен разрешить конкретную запись в
+    #: st.pending_validations (перепроверка отложенной FEAR-валидации).
+    #: engine.consummate() читает его, чтобы знать, какую запись снять.
+    validation_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -78,6 +87,9 @@ class Task:
             "issued_t": round(self.issued_t, 3),
             "expires_t": round(self.expires_t, 3),
             "drive_at_issue": round(self.drive_at_issue, 5),
+            # Исполнитель (tier1_executor) смотрит на этот флаг, а не на
+            # template_id: не жёстко завязываемся на имя конкретного шаблона.
+            "resolves_validation": self.validation_id is not None,
         }
 
 
@@ -117,6 +129,9 @@ class Repertoire:
             return self.h.energy(st) >= 0.35
         if name == "context_fresh":
             return gate.context_band in ("fresh", "aging")
+        if name == "validation_due":
+            return any(v.get("due_at", float("inf")) <= st.t
+                       for v in st.pending_validations.values())
         return False  # fail-closed
 
     def _score(self, st: State, tpl: Dict[str, Any]) -> float:
@@ -144,14 +159,34 @@ class Repertoire:
             cands.append((self._score(st, tpl), tpl))
         if not cands:
             return None
+        # Просроченная перепроверка (validation_due уже выполнено) важнее
+        # рутинного акта того же драйва: без этого приоритета шаблон, стоящий
+        # раньше в списке репертуара, будет вечно выигрывать голую ничью по
+        # score и перепроверка не выпадет никогда, сколько бы она ни была due.
+        due_cands = [c for c in cands if "validation_due" in c[1]["preconditions"]]
+        if due_cands:
+            cands = due_cands
         cands.sort(key=lambda kv: kv[0], reverse=True)
         if cands[0][0] < self.MIN_SCORE:
             return None
         best = cands[0][1]
+        prompt = best["prompt"]
+        validation_id = None
+        if "validation_due" in best["preconditions"]:
+            # Гарантированно непусто: precondition уже проверил, что есть хотя
+            # бы одна due-запись. Берём самую старую due (FIFO), а не любую —
+            # иначе свежие протухшие проверки никогда не доходят до очереди.
+            due = sorted(
+                ((vid, v) for vid, v in st.pending_validations.items()
+                 if v.get("due_at", float("inf")) <= st.t),
+                key=lambda kv: kv[1]["due_at"],
+            )
+            validation_id, ventry = due[0]
+            prompt = prompt.format(validation_rule=ventry.get("rule", ""))
         task = Task(
             template_id=best["id"],
             drive=drive,
-            prompt=best["prompt"],
+            prompt=prompt,
             cost_tier=best["cost_tier"],
             max_tokens=min(best["max_tokens"], gate.max_tokens),
             consummation=best["consummation"],
@@ -162,6 +197,7 @@ class Repertoire:
             issued_t=st.t,
             expires_t=st.t + self.TASK_TTL_S,
             drive_at_issue=st.drives[drive],
+            validation_id=validation_id,
         )
         st.habituation[f"template:{best['id']}"] = (
             st.habituation.get(f"template:{best['id']}", 0.0) + 1.0

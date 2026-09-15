@@ -134,7 +134,8 @@
   "consummation": {
     "rho_full": 0.55,
     "rho_part": 0.15,
-    "novelty_min": 0.35
+    "novelty_min": 0.35,
+    "invalidation_fear_impulse": 0.3
   },
   "verbalizer": {
     "max_chars": 320

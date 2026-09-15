@@ -398,8 +398,14 @@ class Handler(BaseHTTPRequestHandler):
             tid, verified = body.get("template_id"), bool(body.get("verified"))
             if not tid:
                 return self._send(400, {"error": "нужно поле template_id"})
+            # outcome — только для ходов, разрешающих отложенную FEAR-валидацию
+            # (validation_id у popped-задачи); для всех остальных игнорируется.
+            outcome = body.get("outcome")
+            if outcome not in (None, "confirmed", "invalidated"):
+                return self._send(400, {"error": "outcome: confirmed|invalidated|отсутствует"})
             with svc.lock:
-                delta = svc.engine.consummate(tid, verified, float(body.get("cost", 0.0)))
+                delta = svc.engine.consummate(tid, verified, float(body.get("cost", 0.0)),
+                                              outcome=outcome)
                 svc.save_state()
             return self._send(200, {"delta": round(delta, 5)})
 

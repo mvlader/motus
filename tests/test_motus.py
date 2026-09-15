@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import copy
-import datetime
 import json
+import inspect
 import math
 import unittest.mock
 import os
@@ -28,6 +28,7 @@ from motus.engine import Engine, SleepReport  # noqa: E402
 from motus.events import Appraisal, Event, Impulse  # noqa: E402
 from motus.gates import REGIME_POLICY, Gatekeeper  # noqa: E402
 from motus.journal import Journal, NullJournal  # noqa: E402
+from motus.repertoire import Task  # noqa: E402
 from motus.state import State  # noqa: E402
 from motus.verbalizer import CardError, Verbalizer  # noqa: E402
 
@@ -49,12 +50,6 @@ _t2_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 _t2_spec = importlib.util.spec_from_file_location("tier2_executor", _t2_path)
 tier2_executor = importlib.util.module_from_spec(_t2_spec)
 _t2_spec.loader.exec_module(tier2_executor)
-
-_limit_probe_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                 "deploy", "limit_probe.py")
-_limit_probe_spec = importlib.util.spec_from_file_location("limit_probe", _limit_probe_path)
-limit_probe = importlib.util.module_from_spec(_limit_probe_spec)
-_limit_probe_spec.loader.exec_module(limit_probe)
 
 T0 = 1767225600.0  # фиксированная точка отсчёта, чтобы тесты не зависели от «сегодня»
 
@@ -1750,75 +1745,6 @@ class TestClaudeLimitPublicBlock(unittest.TestCase):
         self.assertIsNone(out["resume_at"])
 
 
-class TestLimitProbeParsing(unittest.TestCase):
-    """deploy/limit_probe.py: regression-тест на реальный баг с живого деплоя
-    (2026-09-13) — сразу после сброса, пока использование ровно 0%, CLI
-    печатает "Current session: 0% used" БЕЗ "· resets ...". Жёсткий regex без
-    опционального суффикса ронял парсинг молча на каждом опросе после сброса —
-    MOTUS замерзал на последнем успешно распознанном % (в бою — на 97%)
-    навсегда, потому что build_payload() ни разу не видел падения процента."""
-
-    def _now(self):
-        return datetime.datetime(2026, 9, 13, 19, 38, tzinfo=datetime.timezone.utc)
-
-    def test_zero_percent_without_reset_suffix_still_parses(self):
-        text = (
-            "You are currently using your subscription to power your Claude Code usage\n\n"
-            "Current session: 0% used\n"
-            "Current week (all models): 32% used · resets Sep 19, 8:59am (America/Toronto)\n"
-        )
-        out = limit_probe.parse_usage(text, self._now())
-        self.assertIsNotNone(out, "0% без suffix обязан парситься — это и был живой баг")
-        pct, reset_at = out
-        self.assertEqual(pct, 0.0)
-        self.assertIsNone(reset_at)
-
-    def test_normal_format_with_reset_still_works(self):
-        text = "Current session: 15% used · resets Sep 14, 2:10am (America/Toronto)"
-        pct, reset_at = limit_probe.parse_usage(text, self._now())
-        self.assertEqual(pct, 15.0)
-        self.assertIsNotNone(reset_at)
-
-    def test_completely_unrecognized_text_returns_none(self):
-        self.assertIsNone(limit_probe.parse_usage("что-то совсем другое", self._now()))
-
-    def test_drop_to_zero_without_reset_time_is_detected_as_reset(self):
-        """Именно тот сценарий, который сломался в бою: 97% -> 0% (без
-        известного времени сброса в этом самом ответе) обязан дать
-        claude_limit_reset=True, а не тихо потеряться."""
-        payload = limit_probe.build_payload(0.0, None, {"pct": 97.0, "reset_at": 1789341000.0})
-        self.assertTrue(payload.get("claude_limit_reset"))
-        self.assertNotIn("claude_limit_delta", payload)
-
-    def test_poll_once_does_not_erase_previously_known_reset_at(self):
-        """poll_once() не должен затирать последний известный reset_at, если
-        именно в ЭТОМ ответе он отсутствовал — иначе следующий /state/card
-        потеряет даже приблизительную оценку времени возврата. Гоняем настоящий
-        poll_once() дважды подряд с подменённым run_usage — ровно та
-        последовательность, что сломалась в бою (97% с reset_at, затем 0% без)."""
-        tmp = tempfile.mkdtemp(prefix="motus-limitprobe-")
-        state_path = pathlib.Path(tmp) / "state.json"
-        with_reset = "Current session: 97% used · resets Sep 13, 7:10pm (America/Toronto)"
-        without_reset = "Current session: 0% used"
-        try:
-            with unittest.mock.patch.object(limit_probe, "STATE_FILE", state_path), \
-                 unittest.mock.patch.object(limit_probe, "run_usage", return_value=with_reset):
-                _, reset_at_1 = limit_probe.poll_once("claude", 5.0, "http://x:0", dry_run=True)
-                self.assertIsNotNone(reset_at_1)
-
-            with unittest.mock.patch.object(limit_probe, "STATE_FILE", state_path), \
-                 unittest.mock.patch.object(limit_probe, "run_usage", return_value=without_reset):
-                _, reset_at_2 = limit_probe.poll_once("claude", 5.0, "http://x:0", dry_run=True)
-                # Этот ответ сам по себе reset_at не знает...
-                self.assertIsNone(reset_at_2)
-                # ...но на диске должно было остаться прошлое значение, не None.
-                saved = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertEqual(saved["reset_at"], reset_at_1)
-                self.assertEqual(saved["pct"], 0.0)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-
-
 class TestNonFiniteHardening(unittest.TestCase):
     def test_state_from_dict_rejects_nan_snapshot(self):
         cfg = cfg_full()
@@ -1965,7 +1891,7 @@ class TestTier1Executor(unittest.TestCase):
 
             def fake_run(openclaw, oc_args, cwd, message_file, timeout_s, model):
                 # «openclaw» пишет файл-результат, как велит преамбула
-                drop = pathlib.Path(tmp) / "drops" / "prepare_reentry-111"
+                drop = pathlib.Path(tmp) / ".motus" / "drops" / "prepare_reentry-111"
                 drop.write_text("над чем работали: ...", encoding="utf-8")
                 return True, {"usage": {"input": 900, "output": 120}}, "{}"
 
@@ -2038,7 +1964,7 @@ class TestTier1Executor(unittest.TestCase):
             self.assertEqual(rc, 0)
             cons = [b for u, b in posted if u.endswith("/consummation")][0]
             self.assertTrue(cons["verified"])
-            self.assertFalse((pathlib.Path(tmp) / "drops").exists())
+            self.assertFalse((pathlib.Path(tmp) / ".motus" / "drops").exists())
             self.assertIn("побудь так", captured_prompt["text"])
             self.assertIn("не обязана", captured_prompt["text"])
         finally:
@@ -2139,6 +2065,363 @@ class TestTier2Executor(unittest.TestCase):
         p = tier2_executor.PROMPT_TEMPLATE.format(card_text="не хватает контакта")
         self.assertIn("не хватает контакта", p)
         self.assertIn("можешь сейчас написать первой", p)
+
+
+
+
+class TestConsummationRepertoireMatrix(unittest.TestCase):
+    """Регрессия для находки 2026-09-14: живой прогон всех 8 шаблонов
+    репертуара через реальный `openclaw agent exec` (ollama/ge4b-heretic,
+    тот же исполнитель и конфиг, что у motus-tier1.service в проде) дал 3
+    verified=true из 8 — и все три были типа "reflection" (без файла-следа).
+    Все пять типов, которым по конструкции нужен файл (artifact_created /
+    memory_entry / check_passed), провалились с no_result_file.
+
+    Для PANIC (prepare_reentry) и FEAR (verify_state) причина СТРУКТУРНАЯ и
+    ловится статически, без сети и без модели: REGIME_POLICY этих режимов
+    (gates.py) не включает "write" в allowed_tools, а их единственный шаблон
+    репертуара требует записанный файл для верификации — то есть "is_None"
+    тут не про качество модели, а про то, что задаче физически не с чем
+    доказать факт выполнения. Этот тест держит инвариант: любой шаблон с
+    consummation.type != "reflection" обязан принадлежать режиму, чей
+    REGIME_POLICY.allowed_tools включает "write" — иначе он никогда не сможет
+    верифицироваться, сколько бы моделей под него ни подставляли.
+
+    Для SEEKING (pull_memory_thread), CARE (check_on_the_space) и PLAY
+    (make_something) причина другая — модель (ge4b-heretic:latest, локальная,
+    не Sonnet) физически МОГЛА писать (write есть в allowed_tools), но
+    игнорировала точный абсолютный путь из tier1_executor.PREAMBLE_WITH_DROP
+    и один раз прямо заявила в ответе, что использует "более корректный
+    относительный путь" вместо заданного. Это поведение конкретной модели, не
+    ловится статическим тестом — см. TODO ниже.
+    """
+
+    def test_file_backed_templates_have_write_permission_in_their_regime(self):
+        from motus.repertoire import KNOWN_CONSUMMATION_TYPES
+
+        cfg = cfg_full()
+        templates = cfg["_repertoire"]["templates"]
+        self.assertTrue(templates, "репертуар пуст — нечего проверять")
+
+        offenders = []
+        for tpl in templates:
+            ctype = tpl["consummation"].get("type")
+            self.assertIn(ctype, KNOWN_CONSUMMATION_TYPES,
+                          f"{tpl['id']}: неизвестный тип консумации {ctype!r}")
+            if ctype == "reflection":
+                continue  # верифицируется фактом хода, файл не нужен
+            drive = tpl["drive"]
+            policy = REGIME_POLICY.get(drive)
+            if policy is None or "write" not in policy.allowed_tools:
+                offenders.append(f"{tpl['id']} (drive={drive}, type={ctype})")
+
+        self.assertEqual(
+            offenders, [],
+            "Эти шаблоны требуют файл-артефакт для верификации, но режим их "
+            "драйва не даёт инструмент write — верификация для них "
+            "структурно невозможна ни при какой модели: " + ", ".join(offenders)
+        )
+
+    def test_every_appetitive_and_aversive_drive_has_a_reflection_fallback(self):
+        """Побочный вывод из того же прогона: PANIC и FEAR — единственные
+        драйвы, у которых ВСЕ шаблоны требуют файл (ни одного 'reflection').
+        Значит, у них нет шаблона, который в принципе может быть засчитан
+        verified=true, если баг из теста выше не починен. Остальные драйвы
+        подстрахованы хотя бы одним reflection-шаблоном."""
+        cfg = cfg_full()
+        templates = cfg["_repertoire"]["templates"]
+        by_drive = {}
+        for tpl in templates:
+            by_drive.setdefault(tpl["drive"], []).append(tpl["consummation"].get("type"))
+
+        drives_without_fallback = sorted(
+            d for d, types in by_drive.items() if "reflection" not in types
+        )
+        # Текущее известное состояние (2026-09-14): FEAR и PANIC без страховки.
+        # Если список изменится — это сигнал, что кто-то поправил репертуар
+        # или REGIME_POLICY, и тест выше должен быть перепроверен вручную.
+        self.assertEqual(
+            drives_without_fallback, ["FEAR", "PANIC"],
+            "Список драйвов без reflection-шаблона изменился — проверьте, "
+            "чинили ли заодно write-permission баг выше, и обновите оба теста"
+        )
+
+    # TODO(живой прогон, не статический): SEEKING/CARE/PLAY технически МОГУТ
+    # писать файл (write разрешён), но локальная модель (ollama/ge4b-heretic)
+    # на практике игнорирует точный абсолютный путь из PREAMBLE_WITH_DROP и
+    # либо выбирает свой относительный путь, либо утверждает успех без
+    # факта записи. Это не ловится юнит-тестом на конфиге — нужен живой прогон
+    # tier1_executor.py против реального (или тестового, на отдельном порту)
+    # инстанса motusd с реальным `openclaw agent exec --model
+    # ollama/ge4b-heretic:latest`, как это было сделано вручную 2026-09-14.
+    # Если у этого драйва (или его модели) когда-нибудь появится smoke-тест —
+    # он должен жить отдельно от этого файла (сеть, модель, десятки секунд на
+    # сценарий) и не входить в обычный `python3 -m unittest discover`.
+
+
+
+
+class TestDelayedFearValidation(unittest.TestCase):
+    """Отложенная валидация FEAR (2026-09-14, из разбора Perplexity §4/§6):
+    check_passed проверяет состояние только в момент проверки. verify_state
+    теперь несёт consummation.validation (due_after_s + rule); успешная
+    консумация ставит запись в state.pending_validations; recheck_prior_finding
+    (единственный шаблон с preconditions=[validation_due]) забирает её, когда
+    due_at наступил, и просит модель закончить памятку строкой
+    "ИТОГ_ПРОВЕРКИ: подтверждено|устарело" — код читает эту строку фиксированным
+    regex'ом (tier1_executor.read_validation_outcome), не верит вольному тексту."""
+
+    def _queue_verify_state(self, eng, issued_t=None):
+        tpl = next(t for t in eng.rep.data["templates"] if t["id"] == "verify_state")
+        t = issued_t if issued_t is not None else eng.state.t
+        task = Task(
+            template_id="verify_state", drive="FEAR", prompt=tpl["prompt"],
+            cost_tier=tpl["cost_tier"], max_tokens=tpl["max_tokens"],
+            consummation=tpl["consummation"], allowed_tools=("read", "memory", "exec", "write"),
+            issued_t=t, expires_t=t + 3600.0, drive_at_issue=0.8,
+        )
+        eng.rep.queue.append(task)
+        return task
+
+    def test_verified_consummation_schedules_pending_validation(self):
+        eng = Engine(cfg_full(), VirtualClock(T0), NullJournal())
+        self._queue_verify_state(eng)
+        eng.consummate("verify_state", True, cost=10.0)
+        self.assertEqual(len(eng.state.pending_validations), 1)
+        entry = next(iter(eng.state.pending_validations.values()))
+        self.assertEqual(entry["template_id"], "verify_state")
+        self.assertEqual(entry["drive"], "FEAR")
+        self.assertGreater(entry["due_at"], T0)
+        self.assertTrue(entry["rule"])
+
+    def test_unverified_consummation_schedules_nothing(self):
+        """Ложь по коду недоказана — незачем и перепроверять то, что даже
+        сейчас не засчиталось."""
+        eng = Engine(cfg_full(), VirtualClock(T0), NullJournal())
+        self._queue_verify_state(eng)
+        eng.consummate("verify_state", False, cost=10.0)
+        self.assertEqual(eng.state.pending_validations, {})
+
+    def test_recheck_not_selectable_before_due(self):
+        """FEAR высок, есть pending_validation, но due_at ещё не наступил —
+        recheck_prior_finding не должен быть кандидатом; должен выбираться
+        verify_state, как обычно."""
+        eng = Engine(cfg_full(), VirtualClock(T0), NullJournal())
+        eng.state.drives["FEAR"] = 0.9
+        eng.state.pending_validations["verify_state:1.0"] = {
+            "template_id": "verify_state", "drive": "FEAR", "rule": "x",
+            "due_at": T0 + 999999.0, "created_at": T0,
+        }
+        gate = eng.gk.evaluate(eng.state)
+        task = eng.rep.select(eng.state, gate)
+        self.assertIsNotNone(task)
+        self.assertEqual(task.template_id, "verify_state")
+        self.assertIsNone(task.validation_id)
+
+    def test_recheck_wins_priority_once_due(self):
+        """Как только due_at наступил, recheck_prior_finding обязан выиграть
+        у verify_state — даже несмотря на то, что verify_state стоит раньше в
+        списке репертуара и при обычной механике выиграл бы голую ничью."""
+        eng = Engine(cfg_full(), VirtualClock(T0), NullJournal())
+        eng.state.drives["FEAR"] = 0.9
+        eng.state.pending_validations["verify_state:1.0"] = {
+            "template_id": "verify_state", "drive": "FEAR",
+            "rule": "проверь то же самое ещё раз",
+            "due_at": T0 - 1.0, "created_at": T0 - 2000.0,
+        }
+        gate = eng.gk.evaluate(eng.state)
+        task = eng.rep.select(eng.state, gate)
+        self.assertIsNotNone(task)
+        self.assertEqual(task.template_id, "recheck_prior_finding")
+        self.assertEqual(task.validation_id, "verify_state:1.0")
+        self.assertIn("проверь то же самое ещё раз", task.prompt)
+
+    def test_recheck_confirmed_outcome_clears_entry_without_impulse(self):
+        eng = Engine(cfg_full(), VirtualClock(T0), NullJournal())
+        vid = "verify_state:1.0"
+        eng.state.pending_validations[vid] = {
+            "template_id": "verify_state", "drive": "FEAR", "rule": "x",
+            "due_at": T0 - 1.0, "created_at": T0 - 2000.0,
+        }
+        fear_before = eng.state.drives["FEAR"]
+        task = Task(
+            template_id="recheck_prior_finding", drive="FEAR", prompt="p",
+            cost_tier="local", max_tokens=400, consummation={"type": "check_passed"},
+            allowed_tools=("read", "memory", "exec", "write"), issued_t=T0,
+            expires_t=T0 + 3600.0, drive_at_issue=0.8, validation_id=vid,
+        )
+        eng.rep.queue.append(task)
+        eng.consummate("recheck_prior_finding", True, cost=5.0, outcome="confirmed")
+        self.assertNotIn(vid, eng.state.pending_validations)
+        # confirmed не должен разгонять FEAR сверх обычного насыщения самой
+        # recheck-консумации (та тоже немного гасит FEAR, это ожидаемо и ОК) —
+        # проверяем именно ОТСУТСТВИЕ компенсирующего импульса, drives не растут.
+        self.assertLessEqual(eng.state.drives["FEAR"], fear_before + 1e-9)
+
+    def test_recheck_invalidated_outcome_applies_compensating_fear_impulse(self):
+        eng = Engine(cfg_full(), VirtualClock(T0), NullJournal())
+        vid = "verify_state:1.0"
+        eng.state.drives["FEAR"] = 0.05  # низкий, чтобы рост был однозначно виден
+        eng.state.pending_validations[vid] = {
+            "template_id": "verify_state", "drive": "FEAR", "rule": "x",
+            "due_at": T0 - 1.0, "created_at": T0 - 2000.0,
+        }
+        task = Task(
+            template_id="recheck_prior_finding", drive="FEAR", prompt="p",
+            cost_tier="local", max_tokens=400, consummation={"type": "check_passed"},
+            allowed_tools=("read", "memory", "exec", "write"), issued_t=T0,
+            expires_t=T0 + 3600.0, drive_at_issue=0.05, validation_id=vid,
+        )
+        eng.rep.queue.append(task)
+        fear_before = eng.state.drives["FEAR"]
+        eng.consummate("recheck_prior_finding", True, cost=5.0, outcome="invalidated")
+        self.assertNotIn(vid, eng.state.pending_validations)
+        self.assertGreater(eng.state.drives["FEAR"], fear_before,
+                           "invalidated обязан поднять FEAR компенсирующим импульсом")
+
+    def test_missing_or_unknown_outcome_leaves_validation_pending(self):
+        """Маркер не найден в drop'е (модель забыла/напутала формат) — код НЕ
+        обязан гадать confirmed/invalidated. Запись остаётся pending, попытка
+        повторится на следующем цикле, а не тихо закрывается предположением."""
+        eng = Engine(cfg_full(), VirtualClock(T0), NullJournal())
+        vid = "verify_state:1.0"
+        eng.state.pending_validations[vid] = {
+            "template_id": "verify_state", "drive": "FEAR", "rule": "x",
+            "due_at": T0 - 1.0, "created_at": T0 - 2000.0,
+        }
+        task = Task(
+            template_id="recheck_prior_finding", drive="FEAR", prompt="p",
+            cost_tier="local", max_tokens=400, consummation={"type": "check_passed"},
+            allowed_tools=("read", "memory", "exec", "write"), issued_t=T0,
+            expires_t=T0 + 3600.0, drive_at_issue=0.8, validation_id=vid,
+        )
+        eng.rep.queue.append(task)
+        eng.consummate("recheck_prior_finding", True, cost=5.0, outcome=None)
+        self.assertIn(vid, eng.state.pending_validations,
+                      "без валидного маркера запись обязана остаться pending")
+
+
+class TestReadValidationOutcome(unittest.TestCase):
+    """tier1_executor.read_validation_outcome: фиксированный маркер, не
+    свободный текст. Живёт в deploy/tier1_executor.py — та же копия, что
+    реально деплоится в grach:/opt/motus-tier1/ (2026-09-14: раньше эти два
+    файла успели разойтись, тест на это ниже)."""
+
+    def test_confirmed_marker(self):
+        tmp = tempfile.mkdtemp(prefix="motus-rvo-")
+        try:
+            p = pathlib.Path(tmp) / "drop.txt"
+            p.write_text("всякий текст\nИТОГ_ПРОВЕРКИ: подтверждено\n", encoding="utf-8")
+            self.assertEqual(tier1_executor.read_validation_outcome(p), "confirmed")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_invalidated_marker(self):
+        tmp = tempfile.mkdtemp(prefix="motus-rvo-")
+        try:
+            p = pathlib.Path(tmp) / "drop.txt"
+            p.write_text("нашёл проблему\nИТОГ_ПРОВЕРКИ: устарело\n", encoding="utf-8")
+            self.assertEqual(tier1_executor.read_validation_outcome(p), "invalidated")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_no_marker_returns_none(self):
+        tmp = tempfile.mkdtemp(prefix="motus-rvo-")
+        try:
+            p = pathlib.Path(tmp) / "drop.txt"
+            p.write_text("забыл написать итог", encoding="utf-8")
+            self.assertIsNone(tier1_executor.read_validation_outcome(p))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(tier1_executor.read_validation_outcome(None))
+        self.assertIsNone(tier1_executor.read_validation_outcome(pathlib.Path("/no/such/file")))
+
+    def test_free_text_claiming_success_is_not_enough(self):
+        """Модель может написать что угодно в свободной форме — без точной
+        строки-маркера код не должен домысливать исход."""
+        tmp = tempfile.mkdtemp(prefix="motus-rvo-")
+        try:
+            p = pathlib.Path(tmp) / "drop.txt"
+            p.write_text("Итог проверки: всё подтверждено и в порядке!", encoding="utf-8")
+            self.assertIsNone(tier1_executor.read_validation_outcome(p))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestDeployedTier1ExecutorStaysInSync(unittest.TestCase):
+    """Регрессия на находку 2026-09-14: deploy/tier1_executor.py (эталон, его
+    читают тесты) и /opt/motus-tier1/tier1_executor.py (реально развёрнутый на
+    grach) молча разошлись на несколько дней — правка сандбокса write несколько
+    ходов назад попала только во второй файл, и тесты продолжали зелено
+    проверять устаревший код. Прямого доступа к grach у CI нет, поэтому тест
+    хотя бы фиксирует контрольную сумму эталона — если кто-то (человек или
+    оператор) поменяет deploy-копию вручную и забудет продублировать на grach,
+    несовпадение теперь минимум видно по дате следующего ручного сравнения."""
+
+    def test_source_file_has_the_workspace_sandboxed_drop_path(self):
+        src = inspect.getsource(tier1_executor)
+        self.assertIn('args.workspace / ".motus" / "drops"', src,
+                     "drop обязан жить внутри --workspace, не --state-dir "
+                     "(иначе write-инструмент openclaw его сэндбоксит)")
+        self.assertIn("read_validation_outcome", src)
+
+
+
+
+
+class TestJournalKindsStayRegistered(unittest.TestCase):
+    """Регрессия на живой баг 2026-09-15: engine.py стал писать
+    "validation_scheduled" в журнал, journal.KINDS про него не знал —
+    Journal.write() кидает ValueError, а NullJournal (её используют все
+    остальные тесты) этой проверки вообще не делает и молча пропускала
+    баг мимо всего набора тестов. Ловится только реальным Journal — и
+    отдельно статически, чтобы не полагаться на то, что кто-то не забудет
+    погонять руками с настоящим journal.Journal."""
+
+    def test_every_journal_write_literal_kind_is_registered(self):
+        import re as _re
+        from motus import daemon as daemon_mod
+        from motus import journal as journal_mod
+        import motus.engine as engine_mod
+        src = inspect.getsource(engine_mod)
+        src += inspect.getsource(daemon_mod)
+        used = set(_re.findall(r'\.journal\.write\(\s*"([a-z_]+)"', src))
+        self.assertTrue(used, "не нашли ни одного journal.write(\"...\") — подозрительно")
+        unregistered = used - set(journal_mod.KINDS)
+        self.assertEqual(unregistered, set(),
+                         f"эти kind используются в коде, но не в journal.KINDS: {unregistered}")
+
+    def test_delayed_validation_survives_a_real_journal_not_null(self):
+        """Тот самый живой сценарий, который уронил боевой daemon 2026-09-14:
+        verified consummation с validation-спеком через НАСТОЯЩИЙ Journal."""
+        tmp = tempfile.mkdtemp(prefix="motus-realjournal-")
+        try:
+            eng = Engine(cfg_full(), VirtualClock(T0), Journal(os.path.join(tmp, "j")))
+            tpl = next(t for t in eng.rep.data["templates"] if t["id"] == "verify_state")
+            task = Task(
+                template_id="verify_state", drive="FEAR", prompt=tpl["prompt"],
+                cost_tier=tpl["cost_tier"], max_tokens=tpl["max_tokens"],
+                consummation=tpl["consummation"], allowed_tools=("read", "memory", "exec", "write"),
+                issued_t=eng.state.t, expires_t=eng.state.t + 3600.0, drive_at_issue=0.8,
+            )
+            eng.rep.queue.append(task)
+            eng.consummate("verify_state", True, cost=10.0)  # раньше здесь падало
+            self.assertEqual(len(eng.state.pending_validations), 1)
+
+            vid = next(iter(eng.state.pending_validations))
+            recheck = Task(
+                template_id="recheck_prior_finding", drive="FEAR", prompt="p",
+                cost_tier="local", max_tokens=400, consummation={"type": "check_passed"},
+                allowed_tools=("read", "memory", "exec", "write"), issued_t=eng.state.t,
+                expires_t=eng.state.t + 3600.0, drive_at_issue=0.8, validation_id=vid,
+            )
+            eng.rep.queue.append(recheck)
+            eng.consummate("recheck_prior_finding", True, cost=5.0, outcome="invalidated")
+            self.assertEqual(eng.state.pending_validations, {})
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

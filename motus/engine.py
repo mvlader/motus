@@ -177,8 +177,18 @@ class Engine:
             )
         return imps
 
-    def consummate(self, template_id: str, verified: bool, cost: float = 0.0) -> float:
-        """Засчитать выполнение задачи. Верификацию делает вызывающий КОД, не модель."""
+    def consummate(self, template_id: str, verified: bool, cost: float = 0.0,
+                   outcome: Optional[str] = None) -> float:
+        """Засчитать выполнение задачи. Верификацию делает вызывающий КОД, не модель.
+
+        `outcome` (2026-09-14, отложенная валидация FEAR) — не про ЭТУ
+        консумацию, а про РАНЕЕ запланированную: "confirmed" | "invalidated" |
+        None. Имеет эффект только если у popped-задачи есть validation_id
+        (её поставил recheck-шаблон через select()). Само по себе не история
+        со "словами модели важнее кода": исполнитель обязан прочитать
+        фиксированный маркер из уже провернного через verify() файла-факта,
+        а не просто заявить исход текстом (см. tier1_executor.py).
+        """
         task = self.rep.pop(template_id)
         if task is None:
             self.journal.write(
@@ -187,6 +197,43 @@ class Engine:
             return 0.0
         delta = self.h.consummate(self.state, task.drive, verified, template_id)
         self.rep.record(template_id, delta, cost, verified)
+
+        # Эта консумация сама порождает отложенную проверку (у её шаблона
+        # есть consummation.validation) — только если реально верифицирована:
+        # незачем перепроверять то, что даже сейчас не засчиталось.
+        validation_spec = (task.consummation or {}).get("validation")
+        if verified and validation_spec:
+            due_after_s = float(validation_spec.get("due_after_s", 1800.0))
+            vid = f"{template_id}:{task.issued_t}"
+            self.state.pending_validations[vid] = {
+                "template_id": template_id,
+                "drive": task.drive,
+                "rule": str(validation_spec.get("rule", ""))[:400],
+                "due_at": self.state.t + due_after_s,
+                "created_at": self.state.t,
+            }
+            self.journal.write("validation_scheduled", self.state.t,
+                               {"validation_id": vid, "template_id": template_id,
+                                "due_at": round(self.state.t + due_after_s, 3)})
+
+        # Эта консумация РАЗРЕШАЕТ ранее запланированную проверку.
+        if task.validation_id and outcome in ("confirmed", "invalidated"):
+            entry = self.state.pending_validations.pop(task.validation_id, None)
+            if entry is not None:
+                if outcome == "invalidated":
+                    amp = float(self.cfg["consummation"].get("invalidation_fear_impulse", 0.3))
+                    imp = Impulse("FEAR", amp, f"invalidated:{entry['template_id']}")
+                    applied = self.h.apply_impulse(self.state, imp)
+                    self.journal.write("consummation_invalidated", self.state.t,
+                                       {"validation_id": task.validation_id,
+                                        "template_id": entry["template_id"],
+                                        "applied": round(applied, 5)},
+                                       self.state.snapshot())
+                else:
+                    self.journal.write("validation_confirmed", self.state.t,
+                                       {"validation_id": task.validation_id,
+                                        "template_id": entry["template_id"]})
+
         self.journal.write(
             "consummation",
             self.state.t,
