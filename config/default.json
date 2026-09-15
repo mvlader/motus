@@ -128,7 +128,7 @@
     "tick_max_s": 600,
     "gamma": 2.0,
     "theta_task": 1.0,
-    "theta_act": 1.25,
+    "theta_act": 1.1,
     "task_min_interval_s": 600
   },
   "consummation": {
