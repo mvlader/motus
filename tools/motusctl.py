@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""motusctl — меню-конфигуратор MOTUS (docs: 06-configurator-spec.md).
+"""motusctl — меню-конфигуратор MOTUS (описание — README, раздел «Конфигуратор»).
 
     python3 tools/motusctl.py
 
@@ -9,9 +9,9 @@
 и git не расходятся молча: перед записью меню сверяет деплой с репозиторием.
 
 Что меню не делает никогда:
-  * не пишет state.json демона (§4.1) — живые драйвы не «настройка»;
-  * не трогает gates.REGIME_POLICY (§4.6) — это код, не конфиг;
-  * не делает вид, что правка действует до рестарта motusd (§4.5).
+  * не пишет state.json — им владеет демон, а живые драйвы не «настройка»;
+  * не трогает gates.REGIME_POLICY — это код, не конфиг;
+  * не делает вид, что правка действует до рестарта motusd.
 
 Только stdlib.
 """
@@ -155,7 +155,7 @@ class Target:
     def write_file(self, path: str, data: str) -> None:
         """Атомарно: временный файл рядом → mv. Владелец и права — как у старого файла."""
         if os.path.basename(path) in STATE_FILENAMES:
-            raise PermissionError(f"motusctl не пишет {path}: состоянием владеет демон (§4.1)")
+            raise PermissionError(f"motusctl не пишет {path}: состоянием владеет демон")
         script = ('set -e; tmp=$(mktemp "$1.tmp.XXXXXX"); cat > "$tmp"; '
                   'if [ -e "$1" ]; then chown --reference="$1" "$tmp" 2>/dev/null || true; '
                   'chmod --reference="$1" "$tmp"; else chmod 644 "$tmp"; fi; mv -f "$tmp" "$1"')
@@ -193,7 +193,7 @@ def dump_json(data: Any) -> str:
 
 def atomic_write_text(path: str, text: str) -> None:
     if os.path.basename(path) in STATE_FILENAMES:
-        raise PermissionError(f"motusctl не пишет {path}: состоянием владеет демон (§4.1)")
+        raise PermissionError(f"motusctl не пишет {path}: состоянием владеет демон")
     d = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".tmp.", dir=d)
     try:
@@ -312,7 +312,7 @@ def save_config(cfg: Dict[str, Any], config_dir: str = REPO_CONFIG,
                 now: Optional[float] = None) -> Optional[str]:
     """validate → бэкап → атомарная запись default.json. Возвращает путь бэкапа.
 
-    Порядок важен (§4.3/§4.4): на невалидном конфиге не создаётся ни бэкап, ни запись.
+    Порядок важен: на невалидном конфиге не создаётся ни бэкап, ни запись.
     """
     validate_candidate(cfg, config_dir)
     path = os.path.join(config_dir, "default.json")
@@ -328,7 +328,7 @@ def load_raw_config(config_dir: str = REPO_CONFIG) -> Dict[str, Any]:
     return config.load_json(os.path.join(config_dir, "default.json"))
 
 
-# ============================================================== схема меню (§3.1–3.3)
+# ============================================================== схема меню
 
 #: (заголовок, префикс пути, пояснение). Префикс — ключ верхнего уровня default.json.
 AGENT_SECTIONS: List[Tuple[str, str, str]] = [
@@ -461,7 +461,7 @@ def help_for(path: str) -> str:
     return KEY_HELP.get(path) or KEY_HELP.get(path.rsplit(".", 1)[-1], "")
 
 
-# ============================================================== реплей-стенд (§3.4)
+# ============================================================== тесты драйвов (реплей-стенд)
 
 #: 2026-01-01 00:00 UTC — точка отсчёта синтетики (как в tools/simulate.py).
 SYNTH_T0 = 1767225600.0
@@ -879,7 +879,7 @@ class App:
                 cur = f"сейчас {live[n]:.2f}" if n in live else ""
                 labels.append(f"{n:<8} setpoint={d['setpoint']} θhi={d['theta_hi']} "
                               f"θlo={d['theta_lo']} τ={d['tau_relax_s']}  {cur}")
-            print("\n(живые значения драйвов — состояние, а не настройка: здесь не правятся, §6)")
+            print("\n(живые значения драйвов — состояние, а не настройка: здесь не правятся)")
             i = choose("Драйвы", labels)
             if i is None:
                 return
@@ -1217,7 +1217,7 @@ class App:
         for line in describe_divergences(divs, r.divergences, r.legacy_boots):
             print(line)
 
-    # ---------------------------------------------------------------- openclaw (§5)
+    # ---------------------------------------------------------------- openclaw
 
     OC_KEYS = [
         ("plugins.entries.motus.config.applyGate",

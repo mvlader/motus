@@ -1,7 +1,13 @@
 # Плагин openclaw → MOTUS
 
 openclaw подключается к MOTUS **плагином** (не ручными curl, не текстом в чат).
-Два типизированных хука:
+Три типизированных хука:
+
+**`before_agent_run`** — до вызова модели вообще, независимо от `applyGate`: если
+лимит Claude почти исчерпан (`limit_block.active` в `/state/card`, порог
+`LIMIT_HARD = 0.95` в `motus/gates.py`), ход блокируется и пользователь получает
+готовый текст из MOTUS («отвечу снова примерно через N мин») — лимит не тратится
+на попытку, которая всё равно не пройдёт.
 
 **`before_prompt_build`** — перед каждым ходом агента:
 
@@ -16,7 +22,7 @@ openclaw подключается к MOTUS **плагином** (не ручны
 
 | условие | действие |
 |---|---|
-| `gate.forbidden` содержит `outbound` (например, режим RAGE) | отправка отменяется целиком (`cancel: true`) |
+| `gate.forbidden` содержит `outbound` (сейчас только режим RAGE) | отправка отменяется целиком (`cancel: true`) — любая, включая ответ на прямой вопрос |
 | иначе `content.length` больше бюджета под `gate.max_tokens` | текст обрезается по границе слова (`content: ...`) — оценка символов на токен грубая (`charsPerToken`, умолч. 2.6), настоящего токенайзера у плагина нет |
 
 Это единственное место, где ограничения гейта применяются ЖЁСТКО, а не просьбой
@@ -27,15 +33,15 @@ MOTUS не ответил за `timeoutMs` → ход идёт без карто
 блокируется (fail open — молчание MOTUS не должно ронять доставку). Плагин видит
 только публичный API — ни чисел состояния, ни журнала.
 
-**`timeoutMs` подбирать под `appraisal.mode`.** Дефолт в коде плагина — 2000мс,
-верно только для `mode: lexical` (без сети, ~0мс). При `mode: model` (умолчание
-с 2026-09-10) `/event` синхронно ждёт сетевой вызов к ollama/llama.cpp — тёплый
-~4-6с, холодный до ~50с (docs/04-model-l1.md). С `timeoutMs: 2000` клиент почти
-всегда отваливается раньше ответа сервера — сервер потом пишет ответ в уже
-закрытый сокет (`BrokenPipeError` в журнале MOTUS, безвредно для состояния, но
-карточка в этот ход не попадает в промпт). Ставить `timeoutMs` заметно больше
-`appraisal.timeout_s` (55 по умолчанию), например 60000:
-`openclaw config set plugins.entries.motus.config.timeoutMs 60000`.
+**`timeoutMs` подбирать под `appraisal.mode`.** Дефолт в коде плагина — 2000 мс,
+верно только для `mode: lexical` (без сети, ~0 мс). При `mode: model` `/event` ждёт
+оценку L-1: сейчас это `claude-sonnet-5` через `claude -p`, ~2–3 с, с потолком
+`appraisal.timeout_s` = 55 с (docs/04-model-l1.md). Слишком короткий `timeoutMs` —
+клиент отваливается раньше ответа сервера (`BrokenPipeError` в журнале MOTUS,
+безвредно для состояния, но карточка в этот ход не попадает в промпт). Ставить
+заметно больше `appraisal.timeout_s`, у оператора 60000:
+`openclaw config set plugins.entries.motus.config.timeoutMs 60000` — или через
+конфигуратор, раздел «OpenClaw».
 
 ## Файлы
 
@@ -67,7 +73,7 @@ incus exec grach -- bash -c 'sudo -u openclaw XDG_RUNTIME_DIR=/run/user/1000 sys
 
 ```bash
 incus exec grach -- su - openclaw -c '~/.npm-global/bin/openclaw plugins inspect motus --runtime'
-#   Status: loaded / Typed hooks: before_prompt_build / allow* : true
+#   Status: loaded / Typed hooks: before_agent_run, before_prompt_build, message_sending / allow* : true
 
 # прогнать ход и убедиться, что событие дошло:
 incus exec grach -- su - openclaw -c '~/.npm-global/bin/openclaw agent -m "спасибо, нашёл отличную идею"'
@@ -77,8 +83,9 @@ incus exec motus -- curl -s --unix-socket /run/motusd/adm.sock 'http://x/journal
 
 ## Порядок внедрения
 
-1. `applyGate: false` (как сейчас). Карточка в промпте, сообщения уходят в MOTUS,
-   инструменты не режутся. Пару дней смотреть журнал — состояние движется осмысленно?
+1. `applyGate: false` (у оператора сейчас так). Карточка в промпте, сообщения уходят
+   в MOTUS, блок хода на исчерпанном лимите работает, инструменты не режутся.
+   Смотреть журнал — состояние движется осмысленно?
 2. `applyGate: true` — MOTUS начинает сужать инструменты под режим (`RAGE` → только
    `read`, и т.п.).
 

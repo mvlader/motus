@@ -326,7 +326,7 @@ class ReplayBenchTests(unittest.TestCase):
             motusctl.parse_script("1h teleport")
 
     def test_reference_calibration_from_spec(self):
-        # Эталон §3.4: theta_act=1.25 → за 24ч ни разу, 1.1 → 3ч30м, 1.0 → 3ч14м.
+        # Эталон калибровки 2026-09-15: theta_act=1.25 → за 24ч ни разу, 1.1 → 3ч30м, 1.0 → 3ч14м.
         rows = motusctl.sweep(self.cfg, "heartbeat.theta_act", [1.0, 1.1, 1.25],
                               motusctl.silence_script(24), start_hour=20, tick_s=60)
         got = {r["value"]: r["first_initiation_h"] for r in rows}
