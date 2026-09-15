@@ -14,8 +14,10 @@
 # sessions_send — то есть буквально outbound, что нарушает главное правило
 # Tier1 («фоновая задача никогда не пишет наружу»). Поэтому exec-config.json
 # сам сужает набор инструментов (`agents.entries.main.tools.allow`) до
-# read/write/edit/exec/memory/web — проверено вручную: conversations_send и
-# все каналы отправки отсутствуют в получившемся наборе.
+# read/write/edit/exec/memory — проверено вручную: conversations_send и
+# все каналы отправки отсутствуют в получившемся наборе. web_search/web_fetch
+# убраны 2026-09-15: фоновый ход без человека не должен сам тащить в себя
+# недоверенный текст из сети (за 3 дня ни одного обращения — не нужны).
 [Unit]
 Description=MOTUS — исполнитель фоновых задач (Tier 1)
 After=network-online.target

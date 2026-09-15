@@ -72,9 +72,7 @@
             "process",
             "view_image",
             "memory_get",
-            "memory_search",
-            "web_search",
-            "web_fetch"
+            "memory_search"
           ]
         }
       }
